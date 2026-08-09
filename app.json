@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "Focus Goal",
+    "slug": "focus-goal",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "plugins": [["expo-calendar", {
+      "calendarPermission": "Focus Goal 需要日曆權限，才能將你選取的行動加入系統日曆。",
+      "writeOnlyAccess": true
+    }]],
+    "ios": { "supportsTablet": true },
+    "android": { "package": "com.focusgoal.app" }
+  }
+}
