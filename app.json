@@ -1,15 +1,23 @@
 {
   "expo": {
-    "name": "Focus Goal",
-    "slug": "focus-goal",
+    "name": "Go Go Goal",
+    "slug": "go-go-goal",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "plugins": [["expo-calendar", {
-      "calendarPermission": "Focus Goal 需要日曆權限，才能將你選取的行動加入系統日曆。",
-      "writeOnlyAccess": true
-    }]],
-    "ios": { "supportsTablet": true },
-    "android": { "package": "com.focusgoal.app" }
+    "plugins": [
+      ["expo-image-picker", {
+        "photosPermission": "Go Go Goal 需要相片權限，才能保存你的私人跑步打卡。",
+        "cameraPermission": "Go Go Goal 需要相機權限，才能拍攝跑步打卡相片。"
+      }],
+      ["expo-notifications", {
+        "defaultChannel": "running-commitment"
+      }]
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.gogogoal.app"
+    },
+    "android": { "package": "com.gogogoal.app" }
   }
 }

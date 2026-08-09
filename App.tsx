@@ -1,270 +1,491 @@
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Modal,
+  Image,
+  ImageStyle,
   Linking,
+  Modal,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
-import { exportTasksToCalendar, getCalendarPermissionStatus, PermissionStatus } from './src/calendar';
-import { AvailabilityWindow, defaultAvailability, Goal, Task, weekdayNames, Weekday } from './src/domain';
-import { buildMockPlan } from './src/mock-planning';
-import { loadAppData, saveAppData } from './src/storage';
+import { encouragePhoto, improvePlanWithGemini } from './src/ai';
+import {
+  Account,
+  AppData,
+  defaultAssessment,
+  RecoveryType,
+  RunRecord,
+  RunningAssessment,
+  RunningGoal,
+  RunningPlanDraft,
+  Weekday,
+  weekdayNames,
+} from './src/domain';
+import { cleanupExpiredPhotos, deleteAllAccountPhotos, deleteStoredPhoto, pickAndStorePhoto } from './src/media';
+import { cancelRunningReminders, requestNotificationPermission, scheduleRunningReminders } from './src/notifications';
+import { emptyAppData, loadAppData, loginLocally, replaceAccount, saveAppData } from './src/storage';
+import { addDays, dateKeyInZone, isValidTimezone, minutesUntilSecondPhoto } from './src/time';
+import { RunningCommitmentWorkflow } from './src/workflow';
 
-type Screen = 'home' | 'goal' | 'availability' | 'plan' | 'plan-details' | 'selection' | 'settings' | 'task';
+type Screen = 'workspace' | 'keep-fit' | 'assessment' | 'draft' | 'goal' | 'calendar' | 'archive' | 'settings' | 'revise';
+type Notice = { title: string; message: string } | null;
 
-const DAY_ORDER: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
-const todayString = () => new Date().toISOString().slice(0, 10);
-const twoWeeksLater = () => {
-  const date = new Date();
-  date.setDate(date.getDate() + 14);
-  return date.toISOString().slice(0, 10);
-};
+const workflow = new RunningCommitmentWorkflow();
+const allDays: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
+const statusLabel: Record<RunningGoal['status'], string> = { active: '進行中', paused: '已暫停', completed: '已完成', abandoned: '已放棄' };
+const runStatusLabel: Record<RunRecord['status'], string> = { planned: '待完成', in_progress: '已開始', completed: '已完成', absent: '缺席', skipped: '已跳過' };
 
-function formatTaskTime(task: Task): string {
-  const start = new Date(task.startAt);
-  const end = new Date(task.endAt);
-  const date = new Intl.DateTimeFormat('zh-Hant-TW', { month: 'numeric', day: 'numeric', weekday: 'short' }).format(start);
-  const time = new Intl.DateTimeFormat('zh-Hant-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
-  return `${date} · ${time.format(start)}–${time.format(end)}`;
-}
-
-function durationMinutes(task: Task): number {
-  return Math.max(0, Math.round((new Date(task.endAt).getTime() - new Date(task.startAt).getTime()) / 60_000));
-}
-
-function atDateAndTime(date: string, time: string): Date {
-  return new Date(`${date}T${time}:00`);
-}
-
-function isWithinAvailability(task: Task, availability: AvailabilityWindow[]): boolean {
-  const start = new Date(task.startAt);
-  const end = new Date(task.endAt);
-  const startMinutes = start.getHours() * 60 + start.getMinutes();
-  const endMinutes = end.getHours() * 60 + end.getMinutes();
-  return availability.some((window) => {
-    const [startHour, startMinute] = window.start.split(':').map(Number);
-    const [endHour, endMinute] = window.end.split(':').map(Number);
-    return window.weekday === start.getDay()
-      && startMinutes >= startHour * 60 + startMinute
-      && endMinutes <= endHour * 60 + endMinute;
-  });
-}
-
-function suggestedAlternatives(task: Task, availability: AvailabilityWindow[]): Task[] {
-  const duration = durationMinutes(task);
-  const candidates: Task[] = [];
-  const from = new Date(task.startAt);
-  for (let offset = 0; offset < 14 && candidates.length < 3; offset += 1) {
-    const day = new Date(from);
-    day.setDate(day.getDate() + offset);
-    for (const window of availability.filter((item) => item.weekday === day.getDay())) {
-      const start = atDateAndTime(day.toISOString().slice(0, 10), window.start);
-      const end = new Date(start.getTime() + duration * 60_000);
-      const windowEnd = atDateAndTime(day.toISOString().slice(0, 10), window.end);
-      if (end <= windowEnd) candidates.push({ ...task, startAt: start.toISOString(), endAt: end.toISOString() });
-      if (candidates.length === 3) break;
-    }
-  }
-  return candidates;
-}
-
-function PrimaryButton({ label, onPress, disabled }: { label: string; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" onPress={onPress} disabled={disabled} style={[styles.primaryButton, disabled && styles.disabled]}><Text style={styles.primaryButtonText}>{label}</Text></Pressable>;
-}
-
-function SecondaryButton({ label, onPress, danger }: { label: string; onPress: () => void; danger?: boolean }) {
-  return <Pressable accessibilityRole="button" onPress={onPress} style={styles.secondaryButton}><Text style={[styles.secondaryButtonText, danger && styles.dangerText]}>{label}</Text></Pressable>;
-}
-
-function Field({ label, value, onChangeText, placeholder, multiline = false }: {
-  label: string; value: string; onChangeText: (value: string) => void; placeholder?: string; multiline?: boolean;
-}) {
-  return <View style={styles.field}><Text style={styles.fieldLabel}>{label}</Text><TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor="#8A9690" multiline={multiline} style={[styles.input, multiline && styles.textarea]} /></View>;
-}
-
-function TopBar({ title, onBack, onSettings }: { title: string; onBack?: () => void; onSettings?: () => void }) {
-  return <View style={styles.topBar}><Pressable onPress={onBack} style={styles.topAction}>{onBack ? <Text style={styles.topActionText}>‹ 返回</Text> : <Text style={styles.brand}>Focus Goal</Text>}</Pressable><Text style={styles.topTitle} numberOfLines={1}>{title}</Text><Pressable onPress={onSettings} style={styles.topAction}>{onSettings ? <Text style={styles.topActionText}>設定</Text> : <View />}</Pressable></View>;
-}
+const localTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Hong_Kong';
+const formatDate = (value: string) => new Intl.DateTimeFormat('zh-Hant-HK', { month: 'short', day: 'numeric', weekday: 'short', timeZone: 'UTC' }).format(new Date(`${value}T12:00:00.000Z`));
+const currentVersion = (goal: RunningGoal) => goal.planVersions[goal.planVersions.length - 1];
 
 export default function App() {
-  const [goals, setGoals] = useState<Goal[]>([]);
-  const [screen, setScreen] = useState<Screen>('home');
-  const [activeGoalId, setActiveGoalId] = useState<string | null>(null);
-  const [taskId, setTaskId] = useState<string | null>(null);
+  return <SafeAreaProvider><AppContent /></SafeAreaProvider>;
+}
+
+function AppContent() {
+  const [data, setData] = useState<AppData>(emptyAppData());
   const [ready, setReady] = useState(false);
+  const [screen, setScreen] = useState<Screen>('workspace');
+  const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
+  const [draftId, setDraftId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [permission, setPermission] = useState<PermissionStatus>('undetermined');
-  const [conflict, setConflict] = useState<{ task: Task; alternatives: Task[] } | null>(null);
+  const [notice, setNotice] = useState<Notice>(null);
+
+  const account = useMemo(() => data.accounts.find((item) => item.id === data.sessionAccountId) ?? null, [data]);
+  const selectedGoal = account?.goals.find((goal) => goal.id === selectedGoalId) ?? account?.goals.find((goal) => goal.status === 'active' || goal.status === 'paused') ?? null;
+  const draft = account?.drafts.find((item) => item.id === draftId) ?? null;
 
   useEffect(() => {
-    loadAppData().then((data) => setGoals(data.goals)).catch(() => setNotice('無法讀取本機資料。你仍可建立新的目標。')).finally(() => setReady(true));
-    getCalendarPermissionStatus().then(setPermission).catch(() => setPermission('unavailable'));
+    loadAppData()
+      .then(async (loaded) => {
+        const now = new Date();
+        const deletionCutoff = now.getTime() - 30 * 24 * 60 * 60_000;
+        const dueForDeletion = loaded.accounts.filter((item) => item.deletionRequestedAt && new Date(item.deletionRequestedAt).getTime() <= deletionCutoff);
+        for (const doomed of dueForDeletion) await deleteAllAccountPhotos(doomed);
+        const dueIds = new Set(dueForDeletion.map((item) => item.id));
+        const pruned: AppData = {
+          sessionAccountId: loaded.sessionAccountId && !dueIds.has(loaded.sessionAccountId) ? loaded.sessionAccountId : undefined,
+          accounts: loaded.accounts.filter((item) => !dueIds.has(item.id)),
+        };
+        const active = pruned.accounts.find((item) => item.id === pruned.sessionAccountId);
+        if (!active) return pruned;
+        const settled = workflow.settleAbsences(active, new Date());
+        const cleaned = await cleanupExpiredPhotos(settled, new Date());
+        return replaceAccount(pruned, cleaned);
+      })
+      .then(setData)
+      .catch(() => setNotice({ title: '無法載入資料', message: '你仍可重新登入；現有本機資料未被覆寫。' }))
+      .finally(() => setReady(true));
   }, []);
 
   useEffect(() => {
     if (!ready) return;
-    saveAppData({ goals }).catch(() => setNotice('暫時無法儲存變更，請稍後再試。'));
-  }, [goals, ready]);
+    saveAppData(data).catch(() => setNotice({ title: '暫時無法儲存', message: '請保持 App 開啟並稍後再試。' }));
+  }, [data, ready]);
 
-  const activeGoal = useMemo(() => goals.find((goal) => goal.id === activeGoalId) ?? null, [activeGoalId, goals]);
-  const updateGoal = useCallback((goal: Goal) => setGoals((items) => items.map((item) => item.id === goal.id ? goal : item)), []);
-  const backHome = () => { setTaskId(null); setActiveGoalId(null); setScreen('home'); };
-  const openGoal = (goal: Goal) => { setActiveGoalId(goal.id); setScreen(goal.plan ? 'plan' : 'goal'); };
+  const updateAccount = (next: Account) => setData((current) => replaceAccount(current, next));
+  const showMessage = (message: string, title = 'Go Go Goal') => setNotice({ title, message });
 
-  const createGoal = (draft: Omit<Goal, 'id' | 'createdAt' | 'availability'>) => {
-    const goal: Goal = { ...draft, id: `goal-${Date.now()}`, createdAt: new Date().toISOString(), availability: defaultAvailability };
-    setGoals((items) => [goal, ...items]);
-    setActiveGoalId(goal.id);
-    setScreen('availability');
+  const openGoal = (goal: RunningGoal) => {
+    setSelectedGoalId(goal.id);
+    setScreen('goal');
   };
 
-  const generatePlan = async (goal: Goal) => {
-    setBusy('正在把目標轉成可開始的行動…');
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    const plan = buildMockPlan(goal);
-    updateGoal({ ...goal, plan });
+  const saveDraft = async (assessment: RunningAssessment) => {
+    if (!account) return;
+    setBusy('正在整理適合你的跑步節奏…');
+    const base = workflow.createDraft(assessment, new Date());
+    const nextDraft = base.safetyBlocked ? base : await improvePlanWithGemini(assessment, base);
+    updateAccount(workflow.saveDraft(account, nextDraft));
+    setDraftId(nextDraft.id);
     setBusy(null);
-    setScreen('plan');
+    setScreen('draft');
   };
 
-  const saveTask = (task: Task) => {
-    if (!activeGoal?.plan) return;
-    const goal = { ...activeGoal, plan: { ...activeGoal.plan, tasks: activeGoal.plan.tasks.map((item) => item.id === task.id ? task : item) } };
-    updateGoal(goal);
-    setScreen('plan');
-    if (!isWithinAvailability(task, activeGoal.availability)) setConflict({ task, alternatives: suggestedAlternatives(task, activeGoal.availability) });
+  const finishCommit = async (nextPermission: Account['notificationPermission']) => {
+    if (!account || !draft) return;
+    const prepared = { ...account, notificationPermission: nextPermission };
+    const result = workflow.commit(prepared, draft, new Date());
+    if (!result.ok) return showMessage(result.message, '尚未建立承諾');
+    updateAccount(result.value);
+    const goal = result.value.goals[0];
+    setSelectedGoalId(goal.id);
+    setScreen('goal');
+    await scheduleRunningReminders(goal, result.value).catch(() => undefined);
+    showMessage(nextPermission === 'granted' ? '承諾已啟動，跑步日的 10:00 與 20:00 提醒已安排。' : '承諾已啟動。你未啟用通知，請主動回到 Workspace 查看今天的任務。', '你的承諾已生效');
   };
 
-  const replaceTask = (task: Task) => {
-    if (!activeGoal?.plan) return;
-    updateGoal({ ...activeGoal, plan: { ...activeGoal.plan, tasks: activeGoal.plan.tasks.map((item) => item.id === task.id ? task : item) } });
-  };
-
-  const exportSelected = async () => {
-    if (!activeGoal?.plan) return;
-    const selected = activeGoal.plan.tasks.filter((task) => task.selected);
-    if (!selected.length) { setNotice('請先勾選至少一項任務，再加入日曆。'); return; }
-    setBusy('正在加入系統日曆…');
-    try {
-      const result = await exportTasksToCalendar(selected);
-      setPermission(result.status);
-      if (result.status !== 'granted') {
-        setNotice(result.status === 'unavailable' ? '目前平台無法使用系統日曆。請在 iOS 或 Android 裝置上開啟此功能。' : '日曆權限尚未允許。請在系統設定中允許日曆權限後再試。');
-      } else if (result.failed.length) {
-        setNotice(`已加入 ${result.created} 項任務；${result.failed.length} 項未能建立，可再試一次。`);
-      } else {
-        setNotice(`已將 ${result.created} 項任務加入系統日曆。`);
+  const commitDraft = () => {
+    if (!account || !draft) return;
+    if (account.notificationPermission === 'undetermined') {
+      if (Platform.OS === 'web') {
+        finishCommit('unavailable');
+        return;
       }
-    } catch {
-      setNotice('加入日曆時發生問題。請確認權限後再試一次。');
-    } finally { setBusy(null); }
+      Alert.alert(
+        '是否啟用承諾提醒？',
+        '若不啟用，你仍可承諾，但不會收到跑步日 10:00 與 20:00 的提醒。',
+        [
+          { text: '繼續但不通知', style: 'cancel', onPress: () => finishCommit('denied') },
+          { text: '啟用通知', onPress: async () => finishCommit(await requestNotificationPermission()) },
+        ],
+      );
+      return;
+    }
+    finishCommit(account.notificationPermission);
   };
 
-  if (!ready) return <SafeAreaView style={styles.loadingScreen}><ActivityIndicator color="#306A59" /><Text style={styles.muted}>正在準備你的計畫空間…</Text></SafeAreaView>;
+  const uploadPhoto = async () => {
+    if (!account || !selectedGoal) return;
+    const start = async (analysisEnabled: boolean) => {
+      setBusy('正在保存相片…');
+      let uri: string | null = null;
+      try {
+        uri = await pickAndStorePhoto();
+        if (!uri) return;
+        const encouragement = await encouragePhoto(uri, analysisEnabled);
+        const result = workflow.checkIn({ ...account, photoAnalysisConsent: analysisEnabled }, selectedGoal.id, uri, encouragement.text, encouragement.analysis, new Date());
+        if (!result.ok) {
+          await deleteStoredPhoto(uri);
+          return showMessage(result.message, '未能打卡');
+        }
+        updateAccount(result.value);
+        showMessage(`${encouragement.text}\n\n${result.message}`, result.message.includes('完成') ? '今天完成了' : '第一張已記錄');
+      } catch (error) {
+        if (uri) await deleteStoredPhoto(uri);
+        showMessage(error instanceof Error ? error.message : '相片上傳失敗，請再試一次。', '未能保存相片');
+      } finally {
+        setBusy(null);
+      }
+    };
+    if (!account.photoAnalysisConsent) {
+      Alert.alert(
+        '相片鼓勵需要你的同意',
+        '若啟用，相片會傳送到已設定的 Gemini 後端，只用來產生一則簡短正向鼓勵，不會判定你是否真的跑步。你可隨時在設定關閉。',
+        [
+          { text: '不分析，照常打卡', style: 'cancel', onPress: () => start(false) },
+          { text: '同意並啟用', onPress: () => start(true) },
+        ],
+      );
+      return;
+    }
+    start(true);
+  };
+
+  const applyGoalResult = (result: ReturnType<typeof workflow.pause>) => {
+    if (!result.ok) return showMessage(result.message, '未能更新目標');
+    updateAccount(result.value);
+    showMessage(result.message);
+  };
+
+  if (!ready) {
+    return <SafeAreaView style={styles.loading}><ActivityIndicator size="large" color="#F26B38" /><Text style={styles.muted}>正在打開你的 Workspace…</Text></SafeAreaView>;
+  }
+
+  if (!account) {
+    return <LoginScreen data={data} onLogin={(email, timezone) => {
+      try {
+        const result = loginLocally(data, email, timezone);
+        setData(result.data);
+        setScreen('workspace');
+      } catch (error) {
+        showMessage(error instanceof Error ? error.message : '登入失敗。', '請檢查資料');
+      }
+    }} notice={notice} dismissNotice={() => setNotice(null)} />;
+  }
 
   let content: React.ReactNode;
-  if (screen === 'home') content = <HomeScreen goals={goals} onCreate={() => { setActiveGoalId(null); setScreen('goal'); }} onOpen={openGoal} onUseExample={() => createGoal({ title: '兩週學完 Python 基礎', deadline: twoWeeksLater(), level: '剛開始，想每天有一小段練習。', preferences: '平日晚上較適合，週日休息。' })} onSettings={() => setScreen('settings')} />;
-  else if (screen === 'goal') content = <GoalScreen goal={activeGoal} onBack={backHome} onNext={createGoal} onUpdate={(goal) => { updateGoal(goal); setScreen('availability'); }} />;
-  else if (screen === 'availability' && activeGoal) content = <AvailabilityScreen goal={activeGoal} onBack={() => setScreen('goal')} onSave={(availability) => generatePlan({ ...activeGoal, availability })} />;
-  else if (screen === 'plan' && activeGoal?.plan) content = <PlanScreen goal={activeGoal} onBack={backHome} onEditAvailability={() => setScreen('availability')} onEditPlan={() => setScreen('plan-details')} onEditTask={(id) => { setTaskId(id); setScreen('task'); }} onSelect={() => setScreen('selection')} />;
-  else if (screen === 'plan-details' && activeGoal?.plan) content = <PlanDetailsEditor goal={activeGoal} onBack={() => setScreen('plan')} onSave={(plan) => { updateGoal({ ...activeGoal, plan }); setScreen('plan'); }} />;
-  else if (screen === 'selection' && activeGoal?.plan) content = <SelectionScreen goal={activeGoal} onBack={() => setScreen('plan')} onChange={replaceTask} onExport={exportSelected} />;
-  else if (screen === 'settings') content = <SettingsScreen permission={permission} onBack={backHome} onRefresh={() => getCalendarPermissionStatus().then(setPermission).catch(() => setPermission('unavailable'))} />;
-  else if (screen === 'task' && activeGoal?.plan) content = <TaskEditor task={activeGoal.plan.tasks.find((item) => item.id === taskId) ?? activeGoal.plan.tasks[0]} onBack={() => setScreen('plan')} onSave={saveTask} />;
-  else content = <HomeScreen goals={goals} onCreate={() => setScreen('goal')} onOpen={openGoal} onUseExample={() => undefined} onSettings={() => setScreen('settings')} />;
+  if (screen === 'keep-fit') {
+    content = <KeepFitScreen onBack={() => setScreen('workspace')} onRunning={() => {
+      const current = account.goals.find((goal) => goal.status === 'active' || goal.status === 'paused');
+      if (current) openGoal(current); else setScreen('assessment');
+    }} />;
+  } else if (screen === 'assessment') {
+    content = <AssessmentScreen onBack={() => setScreen('keep-fit')} onSubmit={saveDraft} />;
+  } else if (screen === 'draft' && draft) {
+    content = <DraftScreen draft={draft} onBack={() => setScreen('assessment')} onChange={(next) => {
+      updateAccount(workflow.saveDraft(account, next));
+      setDraftId(next.id);
+    }} onCommit={commitDraft} />;
+  } else if (screen === 'goal' && selectedGoal) {
+    content = <GoalScreen
+      account={account}
+      goal={selectedGoal}
+      onBack={() => setScreen('workspace')}
+      onCheckIn={uploadPhoto}
+      onDeletePhoto={(date, photoId, uri) => Alert.alert('刪除這張相片？', '完成／缺席的文字紀錄仍會保留。', [
+        { text: '取消', style: 'cancel' },
+        { text: '刪除相片', style: 'destructive', onPress: async () => {
+          await deleteStoredPhoto(uri);
+          const result = workflow.removePhoto(account, selectedGoal.id, date, photoId);
+          if (result.ok) updateAccount(result.value);
+          showMessage(result.message);
+        } },
+      ])}
+      onCalendar={() => setScreen('calendar')}
+      onRevise={() => setScreen('revise')}
+      onPause={(reason, resumeDate) => applyGoalResult(workflow.pause(account, selectedGoal.id, reason, resumeDate, new Date()))}
+      onResume={() => applyGoalResult(workflow.resume(account, selectedGoal.id, new Date()))}
+      onAbandon={(reason) => applyGoalResult(workflow.abandon(account, selectedGoal.id, reason, new Date()))}
+      onComplete={() => applyGoalResult(workflow.complete(account, selectedGoal.id, new Date()))}
+      onRecover={(date, type, reason, rescheduledDate) => applyGoalResult(workflow.recoverAbsence(account, selectedGoal.id, date, type, reason, rescheduledDate, new Date()))}
+    />;
+  } else if (screen === 'revise' && selectedGoal) {
+    content = <ReviseScreen goal={selectedGoal} onBack={() => setScreen('goal')} onSave={async (days, minutes, summary, reason) => {
+      const result = workflow.revise(account, selectedGoal.id, days, minutes, summary, reason, new Date());
+      if (!result.ok) return showMessage(result.message, '未能修改計畫');
+      updateAccount(result.value);
+      setScreen('goal');
+      await cancelRunningReminders().catch(() => undefined);
+      const goal = result.value.goals.find((item) => item.id === selectedGoal.id);
+      if (goal) await scheduleRunningReminders(goal, result.value).catch(() => undefined);
+      showMessage(result.message);
+    }} />;
+  } else if (screen === 'calendar') {
+    content = <CalendarScreen account={account} goal={selectedGoal} onBack={() => setScreen('workspace')} onOpen={openGoal} />;
+  } else if (screen === 'archive') {
+    content = <ArchiveScreen account={account} onOpen={openGoal} />;
+  } else if (screen === 'settings') {
+    content = <SettingsScreen account={account} onUpdate={updateAccount} onLogout={() => {
+      setData((current) => ({ ...current, sessionAccountId: undefined }));
+      setScreen('workspace');
+    }} showMessage={showMessage} />;
+  } else {
+    content = <WorkspaceScreen account={account} onKeepFit={() => setScreen('keep-fit')} onOpen={openGoal} />;
+  }
 
-  return <SafeAreaView style={styles.app}><StatusBar style="dark" />{content}{busy && <View style={styles.busy}><View style={styles.busyCard}><ActivityIndicator color="#306A59" /><Text style={styles.busyText}>{busy}</Text></View></View>}{notice && <Modal transparent animationType="fade"><View style={styles.modalBackdrop}><View style={styles.modalCard}><Text style={styles.modalTitle}>Focus Goal</Text><Text style={styles.modalText}>{notice}</Text><PrimaryButton label="知道了" onPress={() => setNotice(null)} /></View></View></Modal>}{conflict && <ConflictModal conflict={conflict} onKeep={() => setConflict(null)} onChoose={(task) => { replaceTask(task); setConflict(null); }} />}</SafeAreaView>;
+  const activeTab: Screen = screen === 'calendar' ? 'calendar' : screen === 'archive' ? 'archive' : screen === 'settings' ? 'settings' : 'workspace';
+  return (
+    <SafeAreaView style={styles.app}>
+      <StatusBar style="dark" />
+      <View style={styles.main}>{content}</View>
+      {!['assessment', 'draft', 'goal', 'revise', 'keep-fit'].includes(screen) && <BottomTabs active={activeTab} onSelect={setScreen} />}
+      {busy && <BusyOverlay message={busy} />}
+      {notice && <NoticeModal notice={notice} onClose={() => setNotice(null)} />}
+    </SafeAreaView>
+  );
 }
 
-function HomeScreen({ goals, onCreate, onOpen, onUseExample, onSettings }: { goals: Goal[]; onCreate: () => void; onOpen: (goal: Goal) => void; onUseExample: () => void; onSettings: () => void }) {
-  return <><TopBar title="你的目標" onSettings={onSettings} /><ScrollView contentContainerStyle={styles.screen}><View style={styles.hero}><Text style={styles.eyebrow}>今天只要開始一小步</Text><Text style={styles.heroTitle}>把想完成的事，排成做得到的行動。</Text><Text style={styles.heroText}>你保有每個決定的主控權；AI 只負責把路徑攤開。</Text></View>{goals.length ? <View style={styles.stack}>{goals.map((goal) => <Pressable key={goal.id} onPress={() => onOpen(goal)} style={styles.goalCard}><Text style={styles.goalTitle}>{goal.title}</Text><Text style={styles.goalMeta}>目標日期：{goal.deadline}</Text><Text style={styles.goalMeta}>{goal.plan ? `${goal.plan.tasks.length} 項可執行任務` : '尚待完成規劃'}</Text></Pressable>)}</View> : <View style={styles.emptyCard}><Text style={styles.emptyTitle}>還沒有目標</Text><Text style={styles.muted}>先放進一件你想完成的事；不需要一次想得很完整。</Text><SecondaryButton label="試試 Python 學習範例" onPress={onUseExample} /></View>}<PrimaryButton label="＋ 建立目標" onPress={onCreate} /></ScrollView></>;
+function LoginScreen({ data, onLogin, notice, dismissNotice }: { data: AppData; onLogin: (email: string, timezone: string) => void; notice: Notice; dismissNotice: () => void }) {
+  const [email, setEmail] = useState(data.accounts[0]?.email ?? 'runner@example.com');
+  const [timezone, setTimezone] = useState(localTimezone());
+  return (
+    <SafeAreaView style={styles.app}>
+      <StatusBar style="dark" />
+      <ScrollView contentContainerStyle={styles.loginScreen} keyboardShouldPersistTaps="handled">
+        <View style={styles.logoMark}><Text style={styles.logoMarkText}>GG</Text></View>
+        <Text style={styles.loginTitle}>Go Go Goal</Text>
+        <Text style={styles.loginSubtitle}>不是再寫一張願望清單。是把承諾留下來，然後每天如實面對。</Text>
+        <View style={styles.formCard}>
+          <Text style={styles.fieldLabel}>電郵地址</Text>
+          <TextInput value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" style={styles.input} placeholder="you@example.com" />
+          <Text style={styles.fieldLabel}>主時區</Text>
+          <TextInput value={timezone} onChangeText={setTimezone} autoCapitalize="none" style={styles.input} placeholder="Asia/Hong_Kong" />
+          <PrimaryButton label="登入私人 Workspace" onPress={() => onLogin(email, timezone)} />
+          <Text style={styles.helper}>此版本以本機帳戶 adapter 示範完整流程；正式發布前可替換為安全的後端驗證。</Text>
+        </View>
+      </ScrollView>
+      {notice && <NoticeModal notice={notice} onClose={dismissNotice} />}
+    </SafeAreaView>
+  );
 }
 
-function GoalScreen({ goal, onBack, onNext, onUpdate }: { goal: Goal | null; onBack: () => void; onNext: (draft: Omit<Goal, 'id' | 'createdAt' | 'availability'>) => void; onUpdate: (goal: Goal) => void }) {
-  const [title, setTitle] = useState(goal?.title ?? '');
-  const [deadline, setDeadline] = useState(goal?.deadline ?? twoWeeksLater());
-  const [level, setLevel] = useState(goal?.level ?? '');
-  const [preferences, setPreferences] = useState(goal?.preferences ?? '');
-  const next = () => {
-    if (!title.trim()) { Alert.alert('先寫下一件想完成的事', '例如：兩週學完 Python 基礎'); return; }
-    const draft = { title: title.trim(), deadline, level, preferences, plan: goal?.plan };
-    if (goal) onUpdate({ ...goal, ...draft }); else onNext(draft);
+function WorkspaceScreen({ account, onKeepFit, onOpen }: { account: Account; onKeepFit: () => void; onOpen: (goal: RunningGoal) => void }) {
+  const current = account.goals.find((goal) => goal.status === 'active' || goal.status === 'paused');
+  const today = dateKeyInZone(new Date(), account.timezone);
+  const todayRecord = current?.records.find((record) => record.date === today);
+  return (
+    <ScrollView contentContainerStyle={styles.screen}>
+      <View style={styles.headerRow}><View><Text style={styles.kicker}>PRIVATE WORKSPACE</Text><Text style={styles.pageTitle}>今天，照承諾做。</Text></View><View style={styles.avatar}><Text style={styles.avatarText}>{account.email[0].toUpperCase()}</Text></View></View>
+      {current ? (
+        <Pressable onPress={() => onOpen(current)} style={styles.commitmentHero}>
+          <View style={styles.rowBetween}><StatusPill status={current.status} /><Text style={styles.heroArrow}>→</Text></View>
+          <Text style={styles.commitmentTitle}>{current.title}</Text>
+          <Text style={styles.commitmentMeta}>{currentVersion(current).weekdays.map((day) => weekdayNames[day]).join('、')} · 每次 {currentVersion(current).minutesPerRun} 分鐘</Text>
+          <View style={styles.todayBar}><View><Text style={styles.todayLabel}>今天</Text><Text style={styles.todayStatus}>{todayRecord ? runStatusLabel[todayRecord.status] : '休息日'}</Text></View><Text style={styles.todayCount}>{todayRecord?.photos.length ?? 0}<Text style={styles.todayCountSmall}> / 2 相片</Text></Text></View>
+        </Pressable>
+      ) : (
+        <View style={styles.emptyHero}><Text style={styles.emptyEyebrow}>沒有進行中的承諾</Text><Text style={styles.emptyTitle}>先建立一個你願意留下紀錄的目標。</Text><Text style={styles.muted}>一旦承諾，目標不能直接刪除；只能完成、暫停或放棄並說明原因。</Text></View>
+      )}
+      <Text style={styles.sectionTitle}>選擇目標類別</Text>
+      <Pressable onPress={onKeepFit} style={styles.categoryCard}>
+        <View style={styles.categoryIcon}><Text style={styles.categoryIconText}>↗</Text></View>
+        <View style={styles.flex}><Text style={styles.categoryTitle}>Keep Fit</Text><Text style={styles.categoryText}>先從 Running 建立可持續的運動節奏。</Text></View>
+        <Text style={styles.cardArrow}>›</Text>
+      </Pressable>
+      <View style={styles.comingRow}><SmallComing title="學習" /><SmallComing title="閱讀" /><SmallComing title="睡眠" /></View>
+      <View style={styles.principleCard}><Text style={styles.principleTitle}>承諾規則</Text><Text style={styles.principleText}>不能直接刪除目標。每次修改、暫停或放棄都會留下原因，讓你看清真正的節奏。</Text></View>
+    </ScrollView>
+  );
+}
+
+function KeepFitScreen({ onBack, onRunning }: { onBack: () => void; onRunning: () => void }) {
+  return <ScreenShell title="Keep Fit" onBack={onBack}><Text style={styles.pageTitle}>你想用哪種方式保持健康？</Text><Text style={styles.pageIntro}>每種運動需要不同的承諾與驗證方式。V1 先把 Running 做好。</Text><Pressable onPress={onRunning} style={styles.runningCard}><Text style={styles.runningNumber}>01</Text><View style={styles.flex}><Text style={styles.runningTitle}>Running</Text><Text style={styles.runningText}>跑步日內完成兩張相片打卡，至少相隔 15 分鐘。</Text></View><Text style={styles.runningArrow}>→</Text></Pressable><ComingSoonCard title="Strength Training" /><ComingSoonCard title="Swimming" /><ComingSoonCard title="Cycling" /></ScreenShell>;
+}
+
+function AssessmentScreen({ onBack, onSubmit }: { onBack: () => void; onSubmit: (assessment: RunningAssessment) => void }) {
+  const [value, setValue] = useState(defaultAssessment);
+  const update = <K extends keyof RunningAssessment>(key: K, next: RunningAssessment[K]) => setValue((current) => ({ ...current, [key]: next }));
+  const toggleDay = (day: Weekday) => update('availableDays', value.availableDays.includes(day) ? value.availableDays.filter((item) => item !== day) : [...value.availableDays, day]);
+  const risks: Array<[keyof Pick<RunningAssessment, 'hasChestPain' | 'hasDizziness' | 'hasHeartOrLungCondition' | 'hasJointProblem' | 'hasMedicalRestriction'>, string]> = [
+    ['hasChestPain', '近期運動時曾胸痛'],
+    ['hasDizziness', '近期曾暈眩或失去平衡'],
+    ['hasHeartOrLungCondition', '已知心臟或肺部問題'],
+    ['hasJointProblem', '有會影響跑步的關節問題'],
+    ['hasMedicalRestriction', '醫生曾限制我運動'],
+  ];
+  return <ScreenShell title="Running 起點" onBack={onBack}><Text style={styles.kicker}>STEP 1 OF 2</Text><Text style={styles.pageTitle}>先定一個安全、做得到的節奏。</Text><Text style={styles.pageIntro}>只收集制定初步計畫需要的資料；不要求體重、外貌相片或精確位置。</Text><Field label="年齡區間" value={value.ageRange} onChangeText={(text) => update('ageRange', text)} /><Field label="近四週的運動情況" value={value.recentActivity} onChangeText={(text) => update('recentActivity', text)} multiline /><Text style={styles.fieldLabel}>每週可跑日子</Text><DayPicker days={value.availableDays} onToggle={toggleDay} /><Field label="每次可投入分鐘" value={String(value.minutesPerRun)} onChangeText={(text) => update('minutesPerRun', Math.max(0, Number(text) || 0))} keyboardType="number-pad" /><Field label="希望提升的能力" value={value.desiredAbility} onChangeText={(text) => update('desiredAbility', text)} multiline /><Field label="其他受傷或健康限制（可留空）" value={value.healthLimitations} onChangeText={(text) => update('healthLimitations', text)} multiline /><Text style={styles.sectionTitle}>快速安全篩查</Text><Text style={styles.helper}>如果任何一項是「有」，App 不會自行建立訓練處方。</Text>{risks.map(([key, label]) => <ToggleRow key={key} label={label} value={value[key]} onChange={(next) => update(key, next)} />)}<PrimaryButton label="產生可修改的計畫草案" onPress={() => value.availableDays.length && value.minutesPerRun >= 15 ? onSubmit(value) : Alert.alert('請檢查計畫資料', '請至少選一個跑步日，並安排每次至少 15 分鐘。')} /></ScreenShell>;
+}
+
+function DraftScreen({ draft, onBack, onChange, onCommit }: { draft: RunningPlanDraft; onBack: () => void; onChange: (draft: RunningPlanDraft) => void; onCommit: () => void }) {
+  return <ScreenShell title="計畫草案" onBack={onBack}><Text style={styles.kicker}>STEP 2 OF 2</Text><Text style={styles.pageTitle}>{draft.safetyBlocked ? '先處理安全疑慮。' : '這份草案要成為你的承諾嗎？'}</Text><View style={[styles.planCard, draft.safetyBlocked && styles.riskCard]}><Text style={styles.planCardLabel}>{draft.safetyBlocked ? '安全提醒' : 'GEMINI／本機安全草案'}</Text><Text style={styles.planCardTitle}>{draft.title}</Text><Text style={styles.planCardText}>{draft.summary}</Text></View>{draft.safetyBlocked ? <><Text style={styles.pageIntro}>請先向醫生或合資格專業人士確認適合的運動方式。獲得許可後，再回來重新完成篩查。</Text><SecondaryButton label="返回修改答案" onPress={onBack} /></> : <><Text style={styles.fieldLabel}>每週跑步日</Text><DayPicker days={draft.weekdays} onToggle={(day) => onChange({ ...draft, weekdays: draft.weekdays.includes(day) ? draft.weekdays.filter((item) => item !== day) : [...draft.weekdays, day] })} /><Field label="每次分鐘" value={String(draft.minutesPerRun)} keyboardType="number-pad" onChangeText={(text) => onChange({ ...draft, minutesPerRun: Math.max(15, Number(text) || 15) })} /><Field label="計畫說明" value={draft.summary} multiline onChangeText={(summary) => onChange({ ...draft, summary })} /><View style={styles.metricRow}><Metric value={`${draft.cycleWeeks} 週`} label="承諾週期" /><Metric value={`${Math.round(draft.targetRate * 100)}%`} label="達標門檻" /><Metric value={`${draft.weekdays.length} 天`} label="每週頻率" /></View><View style={styles.commitWarning}><Text style={styles.commitWarningTitle}>按下後不能直接刪除</Text><Text style={styles.commitWarningText}>你仍可暫停、完成或放棄，但每個選擇都需要留下原因並歸檔。</Text></View><PrimaryButton label="我承諾這個計畫" onPress={onCommit} /></>}</ScreenShell>;
+}
+
+function GoalScreen({ account, goal, onBack, onCheckIn, onDeletePhoto, onCalendar, onRevise, onPause, onResume, onAbandon, onComplete, onRecover }: {
+  account: Account; goal: RunningGoal; onBack: () => void; onCheckIn: () => void; onDeletePhoto: (date: string, photoId: string, uri: string) => void; onCalendar: () => void; onRevise: () => void; onPause: (reason: string, resumeDate: string) => void; onResume: () => void; onAbandon: (reason: string) => void; onComplete: () => void; onRecover: (date: string, type: RecoveryType, reason: string, rescheduledDate?: string) => void;
+}) {
+  const [action, setAction] = useState<'pause' | 'abandon' | 'recover' | null>(null);
+  const [reason, setReason] = useState('');
+  const [resumeDate, setResumeDate] = useState(addDays(dateKeyInZone(new Date(), account.timezone), 7));
+  const [recoveryType, setRecoveryType] = useState<RecoveryType>('skip');
+  const [, refreshTimer] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => refreshTimer((value) => value + 1), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  const today = dateKeyInZone(new Date(), account.timezone);
+  const todayRecord = goal.records.find((record) => record.date === today);
+  const unresolved = goal.records.find((record) => record.status === 'absent' && !record.recovery);
+  const progress = workflow.progress(goal);
+  const firstPhoto = todayRecord?.photos[0];
+  const remaining = minutesUntilSecondPhoto(firstPhoto?.uploadedAt, new Date());
+  return <><ScreenShell title="Running 承諾" onBack={onBack}><View style={styles.rowBetween}><StatusPill status={goal.status} /><Text style={styles.goalDates}>{goal.startDate} → {goal.endDate}</Text></View><Text style={styles.pageTitle}>{goal.title}</Text><Text style={styles.pageIntro}>{currentVersion(goal).summary}</Text><View style={styles.progressCard}><View style={styles.rowBetween}><Text style={styles.progressTitle}>目前完成率</Text><Text style={styles.progressValue}>{Math.round(progress.rate * 100)}%</Text></View><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.min(100, progress.rate * 100)}%` }]} /></View><Text style={styles.helper}>{progress.completed} / {progress.planned} 次完成 · 達標門檻 {Math.round(goal.targetRate * 100)}%</Text></View>{unresolved && <Pressable style={styles.absenceCard} onPress={() => setAction('recover')}><Text style={styles.absenceTitle}>你在 {formatDate(unresolved.date)} 缺席了</Text><Text style={styles.absenceText}>請現在補登說明、標記跳過，或重新安排。不要讓一次缺席變成放棄。</Text><Text style={styles.absenceLink}>立即處理 →</Text></Pressable>}{todayRecord && goal.status === 'active' ? <View style={styles.checkInCard}><Text style={styles.kicker}>TODAY · {formatDate(today)}</Text><Text style={styles.checkInTitle}>{todayRecord.status === 'completed' ? '今天的承諾已完成。' : todayRecord.photos.length ? `第一張已記錄，再等 ${remaining} 分鐘。` : '今天需要兩次相片打卡。'}</Text><Text style={styles.checkInText}>兩張相片須在今天內上傳，至少相隔 15 分鐘。相片只作自我紀錄，不驗證你是否跑步。</Text><View style={styles.photoRow}>{[0, 1].map((index) => { const photo = todayRecord.photos[index]; return <View key={index} style={styles.photoSlot}>{photo ? <Pressable onLongPress={() => onDeletePhoto(today, photo.id, photo.uri)} style={styles.photoPressable}><Image source={{ uri: photo.uri }} style={styles.photo as ImageStyle} /><Text style={styles.deletePhotoHint}>長按刪除</Text></Pressable> : <Text style={styles.photoPlaceholder}>{index + 1}</Text>}<Text style={styles.photoCaption}>{photo ? new Date(photo.uploadedAt).toLocaleTimeString('zh-Hant', { hour: '2-digit', minute: '2-digit' }) : index ? '15 分鐘後' : '開始'}</Text></View>; })}</View>{todayRecord.photos.at(-1)?.encouragement && <Text style={styles.encouragement}>「{todayRecord.photos.at(-1)?.encouragement}」</Text>}<PrimaryButton label={todayRecord.status === 'completed' ? '今天已完成 ✓' : todayRecord.photos.length ? `上傳第二張${remaining ? `（尚需 ${remaining} 分鐘）` : ''}` : '上傳第一張相片'} onPress={onCheckIn} disabled={todayRecord.status === 'completed' || remaining > 0} /></View> : <View style={styles.restCard}><Text style={styles.restTitle}>{goal.status === 'paused' ? `目標暫停至 ${goal.pause?.resumeDate}` : '今天不是計畫跑步日'}</Text><Text style={styles.muted}>回顧你的進度，為下一個跑步日保留空間。</Text></View>}<View style={styles.actionGrid}><ActionButton label="日曆紀錄" onPress={onCalendar} /><ActionButton label="下週調整" onPress={onRevise} disabled={goal.status !== 'active'} />{goal.status === 'paused' ? <ActionButton label="恢復目標" onPress={onResume} /> : <ActionButton label="暫停目標" onPress={() => setAction('pause')} disabled={goal.status !== 'active'} />}<ActionButton label="完成目標" onPress={onComplete} disabled={goal.status === 'completed' || goal.status === 'abandoned'} /></View>{goal.status === 'active' || goal.status === 'paused' ? <SecondaryButton label="放棄並歸檔" onPress={() => setAction('abandon')} danger /> : null}<Text style={styles.sectionTitle}>最近紀錄</Text>{goal.events.slice(-6).reverse().map((entry) => <View key={entry.id} style={styles.timelineItem}><View style={styles.timelineDot} /><View style={styles.flex}><Text style={styles.timelineText}>{entry.message}</Text><Text style={styles.timelineDate}>{new Date(entry.at).toLocaleString('zh-Hant-HK')}</Text></View></View>)}</ScreenShell>{action && <ActionModal title={action === 'pause' ? '暫停目標' : action === 'abandon' ? '放棄並歸檔' : `處理 ${unresolved?.date ?? ''} 的缺席`} onClose={() => { setAction(null); setReason(''); }}><Text style={styles.modalIntro}>{action === 'pause' ? '暫停最長 30 天，到期後必須恢復、延長或放棄。' : action === 'abandon' ? '這個目標會保留在歸檔中，不能當作從未發生。' : '原始缺席會保留，以下選擇只會新增處理紀錄。'}</Text>{action === 'recover' && <View style={styles.segment}>{(['backfill', 'skip', 'reschedule'] as RecoveryType[]).map((type) => <Pressable key={type} onPress={() => setRecoveryType(type)} style={[styles.segmentButton, recoveryType === type && styles.segmentButtonOn]}><Text style={[styles.segmentText, recoveryType === type && styles.segmentTextOn]}>{type === 'backfill' ? '補登' : type === 'skip' ? '跳過' : '重排'}</Text></Pressable>)}</View>}<Field label="原因" value={reason} onChangeText={setReason} multiline placeholder="請誠實留下原因" />{action === 'pause' && <Field label="恢復日期（YYYY-MM-DD）" value={resumeDate} onChangeText={setResumeDate} />}{action === 'recover' && recoveryType === 'reschedule' && <Field label="重新安排日期（YYYY-MM-DD）" value={resumeDate} onChangeText={setResumeDate} />}<PrimaryButton label="確認並留下紀錄" onPress={() => { if (action === 'pause') onPause(reason, resumeDate); else if (action === 'abandon') onAbandon(reason); else if (unresolved) onRecover(unresolved.date, recoveryType, reason, recoveryType === 'reschedule' ? resumeDate : undefined); setAction(null); setReason(''); }} /></ActionModal>}</>;
+}
+
+function ReviseScreen({ goal, onBack, onSave }: { goal: RunningGoal; onBack: () => void; onSave: (days: Weekday[], minutes: number, summary: string, reason: string) => void }) {
+  const version = currentVersion(goal);
+  const [days, setDays] = useState(version.weekdays);
+  const [minutes, setMinutes] = useState(version.minutesPerRun);
+  const [summary, setSummary] = useState(version.summary);
+  const [reason, setReason] = useState('');
+  return <ScreenShell title="調整下週計畫" onBack={onBack}><Text style={styles.pageTitle}>可以調整，但不能改寫今天。</Text><Text style={styles.pageIntro}>修改會從下週一生效，原本版本與原因會永久留在時間軸。</Text><Text style={styles.fieldLabel}>新的跑步日</Text><DayPicker days={days} onToggle={(day) => setDays((current) => current.includes(day) ? current.filter((item) => item !== day) : [...current, day])} /><Field label="每次分鐘" value={String(minutes)} keyboardType="number-pad" onChangeText={(text) => setMinutes(Math.max(15, Number(text) || 15))} /><Field label="計畫說明" value={summary} onChangeText={setSummary} multiline /><Field label="為甚麼要修改？" value={reason} onChangeText={setReason} multiline placeholder="例如：新的工作時間令週三不可行" /><PrimaryButton label="保存為下週的新版本" onPress={() => onSave(days, minutes, summary, reason)} /></ScreenShell>;
+}
+
+function CalendarScreen({ account, goal, onBack, onOpen }: { account: Account; goal: RunningGoal | null; onBack: () => void; onOpen: (goal: RunningGoal) => void }) {
+  const target = goal ?? account.goals.find((item) => item.status === 'active' || item.status === 'paused') ?? account.goals[0];
+  return <ScrollView contentContainerStyle={styles.screen}><View style={styles.headerRow}><View><Text style={styles.kicker}>CALENDAR</Text><Text style={styles.pageTitle}>承諾紀錄</Text></View>{target && <SecondaryButton label="查看目標" onPress={() => onOpen(target)} />}</View>{target ? <><View style={styles.legend}><Legend color="#F26B38" label="完成" /><Legend color="#B83C31" label="缺席" /><Legend color="#E9E6DE" label="待完成" /></View>{target.records.map((record) => <View key={record.id} style={styles.recordRow}><View style={[styles.recordDate, record.status === 'completed' && styles.recordDateDone, record.status === 'absent' && styles.recordDateAbsent]}><Text style={[styles.recordDay, (record.status === 'completed' || record.status === 'absent') && styles.recordDayOn]}>{record.date.slice(8)}</Text><Text style={[styles.recordMonth, (record.status === 'completed' || record.status === 'absent') && styles.recordDayOn]}>{record.date.slice(5, 7)}月</Text></View><View style={styles.flex}><Text style={styles.recordTitle}>{formatDate(record.date)} · {runStatusLabel[record.status]}</Text><Text style={styles.recordMeta}>{record.photos.length} / 2 相片{record.recovery ? ` · 已處理：${record.recovery.reason}` : ''}</Text></View></View>)}</> : <View style={styles.emptyHero}><Text style={styles.emptyTitle}>尚未有跑步紀錄</Text><Text style={styles.muted}>承諾 Running 計畫後，預定日期會出現在這裡。</Text></View>}</ScrollView>;
+}
+
+function ArchiveScreen({ account, onOpen }: { account: Account; onOpen: (goal: RunningGoal) => void }) {
+  const archived = account.goals.filter((goal) => goal.status === 'completed' || goal.status === 'abandoned');
+  return <ScrollView contentContainerStyle={styles.screen}><Text style={styles.kicker}>ARCHIVE</Text><Text style={styles.pageTitle}>完成與放棄，都值得被看見。</Text><Text style={styles.pageIntro}>歸檔不是懲罰；它讓下一次承諾建立在真實紀錄上。</Text>{archived.length ? archived.map((goal) => <Pressable key={goal.id} onPress={() => onOpen(goal)} style={styles.archiveCard}><View style={styles.rowBetween}><StatusPill status={goal.status} /><Text style={styles.cardArrow}>›</Text></View><Text style={styles.archiveTitle}>{goal.title}</Text><Text style={styles.muted}>{goal.archivedReason ?? `${Math.round(workflow.progress(goal).rate * 100)}% 完成率`}</Text></Pressable>) : <View style={styles.emptyHero}><Text style={styles.emptyTitle}>歸檔仍是空的</Text><Text style={styles.muted}>目標完成或放棄後會保留在這裡，不會直接消失。</Text></View>}</ScrollView>;
+}
+
+function SettingsScreen({ account, onUpdate, onLogout, showMessage }: { account: Account; onUpdate: (account: Account) => void; onLogout: () => void; showMessage: (message: string, title?: string) => void }) {
+  const [timezone, setTimezone] = useState(account.timezone);
+  const requestNotifications = async () => {
+    const permission = await requestNotificationPermission();
+    const next = { ...account, notificationPermission: permission };
+    onUpdate(next);
+    const active = next.goals.find((goal) => goal.status === 'active');
+    if (active && permission === 'granted') await scheduleRunningReminders(active, next).catch(() => undefined);
+    showMessage(permission === 'granted' ? '跑步日提醒已啟用。' : '通知未啟用；Workspace 仍會照常結算缺席。');
   };
-  return <><TopBar title={goal ? '調整目標' : '建立目標'} onBack={onBack} /><ScrollView contentContainerStyle={styles.screen}><Text style={styles.pageTitle}>先說說你想完成什麼</Text><Text style={styles.pageIntro}>以下是 AI 的可修改建議，不是固定前提。</Text><View style={styles.chat}><Text style={styles.chatLabel}>Focus Goal AI</Text><Text style={styles.chatText}>我會先根據你的目標建議一個溫和的節奏；你隨時可以修改、清空或拒絕任何建議。</Text></View><Field label="目標" value={title} onChangeText={setTitle} placeholder="例如：完成畢業論文第一章" multiline /><Field label="建議完成日期" value={deadline} onChangeText={setDeadline} placeholder="YYYY-MM-DD" /><Text style={styles.helper}>可改成你覺得合理的日期，例如 {twoWeeksLater()}。</Text><Field label="目前程度" value={level} onChangeText={setLevel} placeholder="例如：剛開始、已有基礎、需要複習" multiline /><Field label="偏好、限制或不可安排的事" value={preferences} onChangeText={setPreferences} placeholder="例如：週日休息、晚上專注力較好" multiline /><PrimaryButton label="設定可用時段" onPress={next} /></ScrollView></>;
+  const requestDeletion = () => Alert.alert('要求刪除帳戶？', '帳戶會進入 30 天可撤銷期。正式後端版本會在期限後刪除個人資料、相片及目標紀錄。', [{ text: '取消', style: 'cancel' }, { text: '開始 30 天撤銷期', style: 'destructive', onPress: () => onUpdate({ ...account, deletionRequestedAt: new Date().toISOString() }) }]);
+  return <ScrollView contentContainerStyle={styles.screen}><Text style={styles.kicker}>SETTINGS</Text><Text style={styles.pageTitle}>你的資料，由你決定。</Text><View style={styles.settingsCard}><Text style={styles.settingsTitle}>帳戶</Text><Text style={styles.muted}>{account.email}</Text><SecondaryButton label="登出" onPress={onLogout} /></View><View style={styles.settingsCard}><Text style={styles.settingsTitle}>主時區</Text><Text style={styles.muted}>跑步日、提醒與午夜截止都依這個時區計算。</Text><TextInput value={timezone} onChangeText={setTimezone} autoCapitalize="none" style={styles.input} /><SecondaryButton label="保存時區" onPress={() => isValidTimezone(timezone) ? onUpdate({ ...account, timezone }) : showMessage('請輸入有效的 IANA 時區，例如 Asia/Hong_Kong。', '時區無效')} /></View><View style={styles.settingsCard}><Text style={styles.settingsTitle}>承諾通知</Text><Text style={styles.muted}>目前狀態：{account.notificationPermission}</Text><SecondaryButton label="要求／重新檢查通知權限" onPress={requestNotifications} />{account.notificationPermission === 'denied' && <SecondaryButton label="開啟系統設定" onPress={() => Linking.openSettings()} />}</View><View style={styles.settingsCard}><View style={styles.rowBetween}><View style={styles.flex}><Text style={styles.settingsTitle}>Gemini 相片鼓勵</Text><Text style={styles.muted}>關閉後仍可正常完成雙相片打卡。</Text></View><Switch value={account.photoAnalysisConsent} onValueChange={(value) => onUpdate({ ...account, photoAnalysisConsent: value })} trackColor={{ true: '#F7A37F' }} thumbColor={account.photoAnalysisConsent ? '#F26B38' : '#F3F1EA'} /></View></View><View style={styles.settingsCard}><Text style={styles.settingsTitle}>資料保存</Text><Text style={styles.muted}>原始相片保存 90 天；文字完成／缺席紀錄會保留。你可在相片仍存在時個別移除。</Text></View>{account.deletionRequestedAt ? <View style={styles.deletionCard}><Text style={styles.settingsTitle}>帳戶正在刪除撤銷期</Text><Text style={styles.muted}>提出時間：{new Date(account.deletionRequestedAt).toLocaleString('zh-Hant-HK')}</Text><SecondaryButton label="取消刪除帳戶" onPress={() => onUpdate({ ...account, deletionRequestedAt: undefined })} /></View> : <SecondaryButton label="刪除帳戶" onPress={requestDeletion} danger />}</ScrollView>;
 }
 
-function AvailabilityScreen({ goal, onBack, onSave }: { goal: Goal; onBack: () => void; onSave: (availability: AvailabilityWindow[]) => void }) {
-  const [windows, setWindows] = useState(goal.availability);
-  const toggleDay = (day: Weekday) => setWindows((items) => items.some((item) => item.weekday === day) ? items.filter((item) => item.weekday !== day) : [...items, { id: `window-${Date.now()}-${day}`, weekday: day, start: day === 6 ? '10:00' : '19:00', end: day === 6 ? '12:00' : '21:00' }]);
-  const updateWindow = (id: string, key: 'start' | 'end', value: string) => setWindows((items) => items.map((item) => item.id === id ? { ...item, [key]: value } : item));
-  return <><TopBar title="可用時段" onBack={onBack} /><ScrollView contentContainerStyle={styles.screen}><Text style={styles.pageTitle}>什麼時候最容易開始？</Text><Text style={styles.pageIntro}>只排進你主動保留的時段。V1 不會讀取既有系統日曆。</Text><View style={styles.availabilityCard}>{DAY_ORDER.map((day) => { const item = windows.find((window) => window.weekday === day); return <View key={day} style={styles.dayRow}><Pressable onPress={() => toggleDay(day)} style={[styles.dayToggle, item && styles.dayToggleOn]}><Text style={[styles.dayToggleText, item && styles.dayToggleTextOn]}>{weekdayNames[day]}</Text></Pressable>{item ? <View style={styles.timeInputs}><TextInput value={item.start} onChangeText={(value) => updateWindow(item.id, 'start', value)} style={styles.timeInput} placeholder="19:00" /><Text style={styles.timeDash}>–</Text><TextInput value={item.end} onChangeText={(value) => updateWindow(item.id, 'end', value)} style={styles.timeInput} placeholder="21:00" /></View> : <Text style={styles.unavailable}>不安排</Text>}</View>; })}</View><Text style={styles.helper}>時間以 24 小時制輸入，例如 19:00。日後可隨時回來調整。</Text><PrimaryButton label="生成可執行計畫" onPress={() => onSave(windows)} /></ScrollView></>;
+function BottomTabs({ active, onSelect }: { active: Screen; onSelect: (screen: Screen) => void }) {
+  const tabs: Array<[Screen, string, string]> = [['workspace', '⌂', 'Workspace'], ['calendar', '▦', '日曆'], ['archive', '◇', '歸檔'], ['settings', '⚙', '設定']];
+  return <View style={styles.tabBar}>{tabs.map(([screen, icon, label]) => <Pressable key={screen} onPress={() => onSelect(screen)} style={styles.tab}><Text style={[styles.tabIcon, active === screen && styles.tabOn]}>{icon}</Text><Text style={[styles.tabLabel, active === screen && styles.tabOn]}>{label}</Text></Pressable>)}</View>;
 }
 
-function PlanScreen({ goal, onBack, onEditAvailability, onEditPlan, onEditTask, onSelect }: { goal: Goal; onBack: () => void; onEditAvailability: () => void; onEditPlan: () => void; onEditTask: (id: string) => void; onSelect: () => void }) {
-  const plan = goal.plan!;
-  return <><TopBar title="AI 行動計畫" onBack={onBack} /><ScrollView contentContainerStyle={styles.screen}><Text style={styles.pageTitle}>{goal.title}</Text><View style={styles.planSummary}><Text style={styles.eyebrow}>建議完成日期</Text><Text style={styles.dueDate}>{plan.suggestedDueDate}</Text><Text style={styles.planText}>{plan.summary}</Text><SecondaryButton label="調整摘要與里程碑" onPress={onEditPlan} /></View>{plan.capacityWarning && <View style={styles.warning}><Text style={styles.warningTitle}>時間可能不足</Text><Text style={styles.warningText}>{plan.capacityWarning}</Text><SecondaryButton label="調整可用時段" onPress={onEditAvailability} /></View>}<Text style={styles.sectionTitle}>里程碑</Text>{plan.milestones.map((item) => <View key={item.title} style={styles.milestone}><Text style={styles.milestoneTitle}>{item.title}</Text><Text style={styles.muted}>{item.description}</Text></View>)}<View style={styles.sectionHeader}><Text style={styles.sectionTitle}>任務清單</Text><Text style={styles.helper}>每項都可修改</Text></View>{plan.tasks.map((task) => <Pressable key={task.id} onPress={() => onEditTask(task.id)} style={styles.taskCard}><View style={styles.taskHead}><Text style={styles.taskTitle}>{task.title}</Text><Text style={styles.editLink}>編輯</Text></View><Text style={styles.taskTime}>{formatTaskTime(task)} · {durationMinutes(task)} 分鐘</Text><Text style={styles.taskDescription}>{task.description}</Text></Pressable>)}<PrimaryButton label="選擇要加入日曆的任務" onPress={onSelect} /></ScrollView></>;
+function ScreenShell({ title, onBack, children }: { title: string; onBack: () => void; children: React.ReactNode }) {
+  return <><View style={styles.topBar}><Pressable onPress={onBack} style={styles.backButton}><Text style={styles.backText}>‹ 返回</Text></Pressable><Text style={styles.topTitle}>{title}</Text><View style={styles.backButton} /></View><ScrollView contentContainerStyle={styles.screen} keyboardShouldPersistTaps="handled">{children}</ScrollView></>;
 }
 
-function PlanDetailsEditor({ goal, onBack, onSave }: { goal: Goal; onBack: () => void; onSave: (plan: NonNullable<Goal['plan']>) => void }) {
-  const plan = goal.plan!;
-  const [summary, setSummary] = useState(plan.summary);
-  const [milestones, setMilestones] = useState(plan.milestones);
-  const updateMilestone = (index: number, key: 'title' | 'description', value: string) => setMilestones((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, [key]: value } : item));
-  return <><TopBar title="調整計畫內容" onBack={onBack} /><ScrollView contentContainerStyle={styles.screen}><Text style={styles.pageTitle}>讓計畫用你的語氣</Text><Text style={styles.pageIntro}>AI 產生的摘要與每個里程碑都可以直接改寫。</Text><Field label="計畫摘要" value={summary} onChangeText={setSummary} multiline />{milestones.map((milestone, index) => <View key={`${milestone.title}-${index}`} style={styles.editorGroup}><Text style={styles.sectionTitle}>里程碑 {index + 1}</Text><Field label="名稱" value={milestone.title} onChangeText={(value) => updateMilestone(index, 'title', value)} /><Field label="說明" value={milestone.description} onChangeText={(value) => updateMilestone(index, 'description', value)} multiline /></View>)}<PrimaryButton label="儲存計畫內容" onPress={() => onSave({ ...plan, summary, milestones })} /></ScrollView></>;
+function PrimaryButton({ label, onPress, disabled }: { label: string; onPress: () => void; disabled?: boolean }) {
+  return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.primaryButton, pressed && !disabled && styles.pressed, disabled && styles.disabled]}><Text style={styles.primaryButtonText}>{label}</Text></Pressable>;
 }
 
-function SelectionScreen({ goal, onBack, onChange, onExport }: { goal: Goal; onBack: () => void; onChange: (task: Task) => void; onExport: () => void }) {
-  const tasks = goal.plan!.tasks;
-  const selectedCount = tasks.filter((task) => task.selected).length;
-  const setAll = (selected: boolean) => tasks.forEach((task) => onChange({ ...task, selected }));
-  return <><TopBar title="加入系統日曆" onBack={onBack} /><ScrollView contentContainerStyle={styles.screen}><Text style={styles.pageTitle}>選擇你想承諾的行動</Text><Text style={styles.pageIntro}>不用一次加入全部。先選你想排進日曆的任務即可。</Text><View style={styles.selectionBar}><Text style={styles.selectedText}>已選 {selectedCount} / {tasks.length} 項</Text><Pressable onPress={() => setAll(selectedCount !== tasks.length)}><Text style={styles.editLink}>{selectedCount === tasks.length ? '取消全選' : '全選'}</Text></Pressable></View>{tasks.map((task) => <Pressable key={task.id} onPress={() => onChange({ ...task, selected: !task.selected })} style={[styles.selectTask, task.selected && styles.selectTaskOn]}><View style={[styles.checkbox, task.selected && styles.checkboxOn]}>{task.selected && <Text style={styles.checkMark}>✓</Text>}</View><View style={styles.selectContent}><Text style={styles.taskTitle}>{task.title}</Text><Text style={styles.taskTime}>{formatTaskTime(task)} · {durationMinutes(task)} 分鐘</Text></View></Pressable>)}<PrimaryButton label={`加入日曆（${selectedCount}）`} onPress={onExport} disabled={!selectedCount} /><Text style={styles.helper}>第一次加入時，系統會請求日曆權限。若拒絕，可在設定頁查看狀態。</Text></ScrollView></>;
+function SecondaryButton({ label, onPress, danger }: { label: string; onPress: () => void; danger?: boolean }) {
+  return <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}><Text style={[styles.secondaryButtonText, danger && styles.dangerText]}>{label}</Text></Pressable>;
 }
 
-function SettingsScreen({ permission, onBack, onRefresh }: { permission: PermissionStatus; onBack: () => void; onRefresh: () => void }) {
-  const message: Record<PermissionStatus, string> = { granted: '已允許：可將選取的任務加入系統日曆。', denied: '尚未允許：請到系統設定開啟 Focus Goal 的日曆權限。', undetermined: '尚未要求：第一次加入日曆時會向你詢問。', unavailable: Platform.OS === 'web' ? '網頁預覽不支援系統日曆；請使用 iOS 或 Android 裝置。' : '目前無法使用系統日曆。' };
-  return <><TopBar title="設定與權限" onBack={onBack} /><ScrollView contentContainerStyle={styles.screen}><Text style={styles.pageTitle}>保持由你決定</Text><View style={styles.settingsCard}><Text style={styles.settingsTitle}>系統日曆</Text><Text style={styles.muted}>{message[permission]}</Text><SecondaryButton label="重新檢查權限" onPress={onRefresh} />{permission === 'denied' && <SecondaryButton label="開啟系統設定" onPress={() => Linking.openSettings()} />}</View><View style={styles.settingsCard}><Text style={styles.settingsTitle}>AI 規劃</Text><Text style={styles.muted}>目前使用可展示與測試的 mock AI 回覆。所有內容都可以在加入日曆前修改。</Text></View><View style={styles.settingsCard}><Text style={styles.settingsTitle}>資料保存</Text><Text style={styles.muted}>你的目標、可用時段、計畫與勾選項目會保存在這部裝置上。</Text></View></ScrollView></>;
+function ActionButton({ label, onPress, disabled }: { label: string; onPress: () => void; disabled?: boolean }) {
+  return <Pressable disabled={disabled} onPress={onPress} style={[styles.actionButton, disabled && styles.disabled]}><Text style={styles.actionButtonText}>{label}</Text><Text style={styles.actionArrow}>→</Text></Pressable>;
 }
 
-function TaskEditor({ task, onBack, onSave }: { task: Task; onBack: () => void; onSave: (task: Task) => void }) {
-  const start = new Date(task.startAt); const end = new Date(task.endAt);
-  const [title, setTitle] = useState(task.title); const [description, setDescription] = useState(task.description);
-  const [date, setDate] = useState(start.toISOString().slice(0, 10));
-  const [startTime, setStartTime] = useState(start.toTimeString().slice(0, 5));
-  const [endTime, setEndTime] = useState(end.toTimeString().slice(0, 5));
-  const save = () => {
-    const nextStart = atDateAndTime(date, startTime); const nextEnd = atDateAndTime(date, endTime);
-    if (!title.trim() || Number.isNaN(nextStart.getTime()) || Number.isNaN(nextEnd.getTime()) || nextEnd <= nextStart) { Alert.alert('請檢查任務時間', '結束時間需晚於開始時間，日期格式為 YYYY-MM-DD。'); return; }
-    onSave({ ...task, title: title.trim(), description, startAt: nextStart.toISOString(), endAt: nextEnd.toISOString() });
-  };
-  return <><TopBar title="調整任務" onBack={onBack} /><ScrollView contentContainerStyle={styles.screen}><Text style={styles.pageTitle}>這一項要怎麼做？</Text><Text style={styles.pageIntro}>你可修改任何 AI 產生的內容。若新時間不在可用時段內，我們會只提出候選時段供你選擇。</Text><Field label="任務名稱" value={title} onChangeText={setTitle} multiline /><Field label="簡短說明" value={description} onChangeText={setDescription} multiline /><Field label="日期" value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" /><Field label="開始時間" value={startTime} onChangeText={setStartTime} placeholder="19:00" /><Field label="結束時間" value={endTime} onChangeText={setEndTime} placeholder="20:00" /><PrimaryButton label="儲存任務" onPress={save} /></ScrollView></>;
+function Field({ label, value, onChangeText, placeholder, multiline, keyboardType }: { label: string; value: string; onChangeText: (text: string) => void; placeholder?: string; multiline?: boolean; keyboardType?: 'default' | 'number-pad' }) {
+  return <View style={styles.field}><Text style={styles.fieldLabel}>{label}</Text><TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor="#9A978E" multiline={multiline} keyboardType={keyboardType} style={[styles.input, multiline && styles.textarea]} /></View>;
 }
 
-function ConflictModal({ conflict, onKeep, onChoose }: { conflict: { task: Task; alternatives: Task[] }; onKeep: () => void; onChoose: (task: Task) => void }) {
-  return <Modal transparent animationType="fade"><View style={styles.modalBackdrop}><View style={styles.modalCard}><Text style={styles.modalTitle}>這個時間不在你的可用時段</Text><Text style={styles.modalText}>你的修改已保留。若想改到已設定的時段，可從以下選擇；我們不會自動替你改排。</Text>{conflict.alternatives.length ? conflict.alternatives.map((task) => <Pressable key={task.startAt} onPress={() => onChoose(task)} style={styles.alternative}><Text style={styles.alternativeTitle}>{formatTaskTime(task)}</Text><Text style={styles.editLink}>使用此時段</Text></Pressable>) : <Text style={styles.muted}>目前沒有足夠長的備用時段。你可調整可用時段或保留這個時間。</Text>}<SecondaryButton label="保留我選的時間" onPress={onKeep} /></View></View></Modal>;
+function DayPicker({ days, onToggle }: { days: Weekday[]; onToggle: (day: Weekday) => void }) {
+  return <View style={styles.dayPicker}>{allDays.map((day) => <Pressable key={day} onPress={() => onToggle(day)} style={[styles.dayChip, days.includes(day) && styles.dayChipOn]}><Text style={[styles.dayChipText, days.includes(day) && styles.dayChipTextOn]}>{weekdayNames[day].replace('週', '')}</Text></Pressable>)}</View>;
 }
+
+function ToggleRow({ label, value, onChange }: { label: string; value: boolean; onChange: (value: boolean) => void }) {
+  return <Pressable onPress={() => onChange(!value)} style={styles.toggleRow}><Text style={styles.toggleLabel}>{label}</Text><View style={[styles.yesNo, value && styles.yesNoOn]}><Text style={[styles.yesNoText, value && styles.yesNoTextOn]}>{value ? '有' : '沒有'}</Text></View></Pressable>;
+}
+
+function StatusPill({ status }: { status: RunningGoal['status'] }) {
+  return <View style={[styles.statusPill, status === 'completed' && styles.statusDone, status === 'abandoned' && styles.statusAbandoned, status === 'paused' && styles.statusPaused]}><Text style={styles.statusText}>{statusLabel[status]}</Text></View>;
+}
+
+function Metric({ value, label }: { value: string; label: string }) { return <View style={styles.metric}><Text style={styles.metricValue}>{value}</Text><Text style={styles.metricLabel}>{label}</Text></View>; }
+function SmallComing({ title }: { title: string }) { return <View style={styles.smallComing}><Text style={styles.smallComingTitle}>{title}</Text><Text style={styles.smallComingText}>即將推出</Text></View>; }
+function ComingSoonCard({ title }: { title: string }) { return <View style={styles.comingCard}><Text style={styles.comingTitle}>{title}</Text><Text style={styles.comingTag}>COMING SOON</Text></View>; }
+function Legend({ color, label }: { color: string; label: string }) { return <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: color }]} /><Text style={styles.legendText}>{label}</Text></View>; }
+
+function ActionModal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return <Modal transparent animationType="slide" onRequestClose={onClose}><View style={styles.modalBackdrop}><View style={styles.actionModal}><View style={styles.rowBetween}><Text style={styles.modalTitle}>{title}</Text><Pressable onPress={onClose}><Text style={styles.modalClose}>✕</Text></Pressable></View>{children}</View></View></Modal>;
+}
+
+function NoticeModal({ notice, onClose }: { notice: NonNullable<Notice>; onClose: () => void }) {
+  return <Modal transparent animationType="fade" onRequestClose={onClose}><View style={styles.modalBackdrop}><View style={styles.noticeCard}><View style={styles.noticeMark}><Text style={styles.noticeMarkText}>✓</Text></View><Text style={styles.modalTitle}>{notice.title}</Text><Text style={styles.modalText}>{notice.message}</Text><PrimaryButton label="知道了" onPress={onClose} /></View></View></Modal>;
+}
+
+function BusyOverlay({ message }: { message: string }) { return <View style={styles.busy}><View style={styles.busyCard}><ActivityIndicator color="#F26B38" /><Text style={styles.busyText}>{message}</Text></View></View>; }
+
+const colors = { ink: '#20211E', muted: '#6F706A', paper: '#F7F5EF', white: '#FFFDF9', orange: '#F26B38', orangePale: '#FBE7DC', green: '#2F6D58', red: '#B83C31', line: '#E4E0D6' };
 
 const styles = StyleSheet.create({
-  app: { flex: 1, backgroundColor: '#F6F7F3' }, loadingScreen: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12, backgroundColor: '#F6F7F3' },
-  topBar: { height: 56, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: '#E4E8E2', backgroundColor: '#FBFCF8' }, topAction: { minWidth: 72 }, topActionText: { color: '#306A59', fontWeight: '700' }, topTitle: { position: 'absolute', left: 96, right: 96, textAlign: 'center', fontWeight: '700', color: '#17342D' }, brand: { color: '#17342D', fontWeight: '800', fontSize: 16 },
-  screen: { padding: 20, paddingBottom: 44, gap: 14 }, hero: { paddingTop: 20, gap: 8 }, eyebrow: { color: '#3E7465', fontWeight: '800', fontSize: 12, letterSpacing: .6 }, heroTitle: { color: '#17342D', fontSize: 30, fontWeight: '800', lineHeight: 40 }, heroText: { color: '#5A6761', fontSize: 16, lineHeight: 24 },
-  pageTitle: { color: '#17342D', fontSize: 25, fontWeight: '800', lineHeight: 34 }, pageIntro: { color: '#5A6761', lineHeight: 22, marginBottom: 6 }, muted: { color: '#64736B', lineHeight: 21 }, helper: { color: '#718077', fontSize: 13, lineHeight: 19 },
-  primaryButton: { backgroundColor: '#306A59', paddingVertical: 15, paddingHorizontal: 18, borderRadius: 15, alignItems: 'center', marginTop: 6 }, primaryButtonText: { color: 'white', fontWeight: '800', fontSize: 16 }, secondaryButton: { alignSelf: 'flex-start', paddingVertical: 9, paddingHorizontal: 12, borderRadius: 10, backgroundColor: '#E6F0EB', marginTop: 6 }, secondaryButtonText: { color: '#306A59', fontWeight: '700' }, disabled: { opacity: .45 }, dangerText: { color: '#9F3535' },
-  stack: { gap: 10 }, goalCard: { backgroundColor: '#FFF', padding: 18, borderRadius: 18, gap: 6, borderWidth: 1, borderColor: '#E5E9E4' }, goalTitle: { color: '#17342D', fontWeight: '800', fontSize: 17 }, goalMeta: { color: '#66766C', fontSize: 13 }, emptyCard: { backgroundColor: '#ECF3EE', borderRadius: 18, padding: 20, gap: 10 }, emptyTitle: { fontSize: 18, fontWeight: '800', color: '#17342D' },
-  chat: { backgroundColor: '#E7F1EC', padding: 16, borderRadius: 16, gap: 6 }, chatLabel: { fontWeight: '800', color: '#306A59', fontSize: 13 }, chatText: { color: '#335248', lineHeight: 21 }, field: { gap: 7 }, fieldLabel: { color: '#29453B', fontWeight: '700', fontSize: 14 }, input: { borderWidth: 1, borderColor: '#D6DED7', backgroundColor: '#FFF', borderRadius: 12, paddingHorizontal: 13, paddingVertical: 12, color: '#17342D', fontSize: 16 }, textarea: { minHeight: 84, textAlignVertical: 'top' },
-  availabilityCard: { backgroundColor: '#FFF', borderRadius: 18, padding: 10, borderWidth: 1, borderColor: '#E1E7E1' }, dayRow: { flexDirection: 'row', alignItems: 'center', minHeight: 48, gap: 10, borderBottomWidth: 1, borderBottomColor: '#EEF1ED' }, dayToggle: { width: 54, alignItems: 'center', paddingVertical: 8, borderRadius: 10, backgroundColor: '#EDF0EC' }, dayToggleOn: { backgroundColor: '#CFE4D9' }, dayToggleText: { color: '#64736B', fontSize: 13, fontWeight: '700' }, dayToggleTextOn: { color: '#205341' }, timeInputs: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 5 }, timeInput: { flex: 1, backgroundColor: '#F5F7F4', padding: 8, borderRadius: 8, textAlign: 'center', color: '#17342D' }, timeDash: { color: '#728078' }, unavailable: { color: '#87928B', fontSize: 13 },
-  planSummary: { backgroundColor: '#E7F1EC', borderRadius: 18, padding: 18, gap: 6 }, dueDate: { fontSize: 23, fontWeight: '800', color: '#205341' }, planText: { color: '#355B4D', lineHeight: 21 }, warning: { backgroundColor: '#FFF4DD', borderRadius: 16, padding: 16, gap: 6 }, warningTitle: { fontWeight: '800', color: '#87611E' }, warningText: { color: '#76591F', lineHeight: 20 }, sectionTitle: { color: '#17342D', fontWeight: '800', fontSize: 19, marginTop: 8 }, sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' }, milestone: { borderLeftWidth: 3, borderLeftColor: '#82B09E', paddingLeft: 13, gap: 4 }, milestoneTitle: { color: '#26463A', fontWeight: '800' }, taskCard: { backgroundColor: '#FFF', borderRadius: 16, padding: 15, gap: 7, borderWidth: 1, borderColor: '#E3E8E2' }, taskHead: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 }, taskTitle: { color: '#1C3C31', fontWeight: '800', fontSize: 15, flex: 1 }, editLink: { color: '#306A59', fontWeight: '700', fontSize: 13 }, taskTime: { color: '#3E7465', fontSize: 13, fontWeight: '700' }, taskDescription: { color: '#617068', lineHeight: 20, fontSize: 13 },
-  selectionBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#E7F1EC', padding: 14, borderRadius: 13 }, selectedText: { color: '#264C3F', fontWeight: '800' }, selectTask: { backgroundColor: '#FFF', flexDirection: 'row', gap: 12, padding: 14, borderRadius: 15, borderWidth: 1, borderColor: '#E1E8E2', alignItems: 'center' }, selectTaskOn: { borderColor: '#78A992', backgroundColor: '#FBFFFC' }, checkbox: { height: 23, width: 23, borderRadius: 7, borderWidth: 2, borderColor: '#B5C1BA', alignItems: 'center', justifyContent: 'center' }, checkboxOn: { backgroundColor: '#306A59', borderColor: '#306A59' }, checkMark: { color: 'white', fontWeight: '800' }, selectContent: { flex: 1, gap: 4 },
-  settingsCard: { backgroundColor: '#FFF', borderRadius: 16, borderWidth: 1, borderColor: '#E1E7E1', padding: 17, gap: 8 }, settingsTitle: { color: '#17342D', fontWeight: '800', fontSize: 16 }, editorGroup: { gap: 10, paddingTop: 8 },
-  busy: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(22, 45, 37, .22)', alignItems: 'center', justifyContent: 'center' }, busyCard: { backgroundColor: '#FFF', padding: 22, borderRadius: 18, alignItems: 'center', gap: 12, marginHorizontal: 34 }, busyText: { color: '#26463A', fontWeight: '700', textAlign: 'center' }, modalBackdrop: { flex: 1, backgroundColor: 'rgba(16, 38, 31, .36)', justifyContent: 'center', padding: 22 }, modalCard: { backgroundColor: '#FCFDF9', padding: 22, borderRadius: 20, gap: 12 }, modalTitle: { color: '#17342D', fontWeight: '800', fontSize: 20 }, modalText: { color: '#53635B', lineHeight: 22 }, alternative: { padding: 13, borderRadius: 12, backgroundColor: '#E8F2EC', gap: 4 }, alternativeTitle: { color: '#264C3F', fontWeight: '800' },
+  app: { flex: 1, backgroundColor: colors.paper }, main: { flex: 1 }, loading: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14, backgroundColor: colors.paper },
+  loginScreen: { flexGrow: 1, padding: 28, justifyContent: 'center', alignItems: 'center', gap: 14 }, logoMark: { width: 66, height: 66, borderRadius: 22, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center', transform: [{ rotate: '-5deg' }] }, logoMarkText: { color: '#fff', fontSize: 24, fontWeight: '900' }, loginTitle: { color: colors.ink, fontWeight: '900', fontSize: 36, letterSpacing: -1.4 }, loginSubtitle: { color: colors.muted, fontSize: 16, lineHeight: 24, textAlign: 'center', maxWidth: 360, marginBottom: 12 }, formCard: { width: '100%', maxWidth: 440, backgroundColor: colors.white, padding: 20, borderRadius: 24, gap: 12, borderWidth: 1, borderColor: colors.line },
+  topBar: { height: 58, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, backgroundColor: colors.paper }, backButton: { width: 78 }, backText: { color: colors.orange, fontWeight: '800', fontSize: 15 }, topTitle: { color: colors.ink, fontWeight: '800', fontSize: 16 },
+  screen: { padding: 20, paddingBottom: 44, gap: 15 }, headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 }, rowBetween: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, row: { flexDirection: 'row', alignItems: 'center', gap: 10 }, flex: { flex: 1 },
+  kicker: { color: colors.orange, fontWeight: '900', fontSize: 11, letterSpacing: 1.4 }, pageTitle: { color: colors.ink, fontSize: 29, lineHeight: 36, fontWeight: '900', letterSpacing: -0.9 }, pageIntro: { color: colors.muted, fontSize: 15, lineHeight: 23 }, sectionTitle: { color: colors.ink, fontSize: 19, fontWeight: '900', marginTop: 8 }, muted: { color: colors.muted, lineHeight: 21 }, helper: { color: '#85857F', fontSize: 12.5, lineHeight: 18 },
+  avatar: { width: 42, height: 42, borderRadius: 15, backgroundColor: colors.ink, alignItems: 'center', justifyContent: 'center' }, avatarText: { color: '#fff', fontWeight: '900' },
+  commitmentHero: { backgroundColor: colors.ink, borderRadius: 26, padding: 20, gap: 10 }, heroArrow: { color: colors.orange, fontSize: 24, fontWeight: '800' }, commitmentTitle: { color: '#fff', fontSize: 25, lineHeight: 31, fontWeight: '900' }, commitmentMeta: { color: '#C8C7C1', lineHeight: 20 }, todayBar: { backgroundColor: '#30312D', borderRadius: 17, marginTop: 4, padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, todayLabel: { color: '#A8A8A2', fontSize: 11, fontWeight: '800' }, todayStatus: { color: '#fff', fontWeight: '800', fontSize: 16 }, todayCount: { color: colors.orange, fontWeight: '900', fontSize: 24 }, todayCountSmall: { color: '#B8B8B1', fontWeight: '600', fontSize: 12 },
+  emptyHero: { backgroundColor: colors.white, borderRadius: 24, borderWidth: 1, borderColor: colors.line, padding: 20, gap: 9 }, emptyEyebrow: { color: colors.orange, fontSize: 12, fontWeight: '900' }, emptyTitle: { color: colors.ink, fontSize: 21, fontWeight: '900', lineHeight: 28 },
+  categoryCard: { backgroundColor: colors.white, borderRadius: 22, borderWidth: 1, borderColor: colors.line, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 14 }, categoryIcon: { width: 48, height: 48, borderRadius: 16, backgroundColor: colors.orangePale, alignItems: 'center', justifyContent: 'center' }, categoryIconText: { color: colors.orange, fontSize: 24, fontWeight: '900' }, categoryTitle: { color: colors.ink, fontSize: 18, fontWeight: '900' }, categoryText: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 3 }, cardArrow: { color: colors.orange, fontWeight: '900', fontSize: 27 }, comingRow: { flexDirection: 'row', gap: 9 }, smallComing: { flex: 1, backgroundColor: '#EFECE5', borderRadius: 14, padding: 12 },
+  smallComingTitle: { color: '#77776F', fontWeight: '800', fontSize: 13 }, smallComingText: { color: '#A09F98', fontSize: 10, marginTop: 4 }, principleCard: { borderLeftWidth: 3, borderLeftColor: colors.orange, paddingLeft: 15, paddingVertical: 5, marginTop: 4 }, principleTitle: { color: colors.ink, fontWeight: '900' }, principleText: { color: colors.muted, lineHeight: 21, marginTop: 5 },
+  runningCard: { backgroundColor: colors.orange, borderRadius: 24, padding: 20, flexDirection: 'row', alignItems: 'center', gap: 15 }, runningNumber: { color: '#FFD8C6', fontSize: 13, fontWeight: '900' }, runningTitle: { color: '#fff', fontSize: 24, fontWeight: '900' }, runningText: { color: '#FFF0E8', lineHeight: 20, marginTop: 4 }, runningArrow: { color: '#fff', fontSize: 26, fontWeight: '900' }, comingCard: { padding: 18, borderRadius: 20, borderWidth: 1, borderColor: colors.line, backgroundColor: '#F0EEE8', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, comingTitle: { color: '#77776F', fontWeight: '800', fontSize: 16 }, comingTag: { color: '#A3A198', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
+  field: { gap: 7 }, fieldLabel: { color: colors.ink, fontSize: 13, fontWeight: '800' }, input: { backgroundColor: colors.white, borderWidth: 1, borderColor: colors.line, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 13, color: colors.ink, fontSize: 16 }, textarea: { minHeight: 86, textAlignVertical: 'top' }, dayPicker: { flexDirection: 'row', gap: 7, flexWrap: 'wrap' }, dayChip: { width: 40, height: 40, borderRadius: 13, backgroundColor: '#EDEAE3', alignItems: 'center', justifyContent: 'center' }, dayChipOn: { backgroundColor: colors.ink }, dayChipText: { color: colors.muted, fontWeight: '800' }, dayChipTextOn: { color: '#fff' },
+  toggleRow: { minHeight: 52, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 }, toggleLabel: { color: colors.ink, flex: 1, lineHeight: 20 }, yesNo: { backgroundColor: '#E9E6DE', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 10 }, yesNoOn: { backgroundColor: '#F5D8D2' }, yesNoText: { color: colors.muted, fontWeight: '800', fontSize: 12 }, yesNoTextOn: { color: colors.red },
+  planCard: { backgroundColor: colors.ink, borderRadius: 24, padding: 21, gap: 8 }, riskCard: { backgroundColor: '#6B2D28' }, planCardLabel: { color: '#F7A37F', fontSize: 10, fontWeight: '900', letterSpacing: 1.1 }, planCardTitle: { color: '#fff', fontSize: 22, fontWeight: '900' }, planCardText: { color: '#D7D5CF', lineHeight: 22 }, metricRow: { flexDirection: 'row', gap: 8 }, metric: { flex: 1, backgroundColor: colors.white, borderRadius: 16, padding: 13, borderWidth: 1, borderColor: colors.line }, metricValue: { color: colors.ink, fontSize: 18, fontWeight: '900' }, metricLabel: { color: colors.muted, fontSize: 10, marginTop: 3 }, commitWarning: { backgroundColor: colors.orangePale, padding: 15, borderRadius: 16, gap: 5 }, commitWarningTitle: { color: '#80391E', fontWeight: '900' }, commitWarningText: { color: '#8B523A', lineHeight: 20, fontSize: 13 },
+  progressCard: { backgroundColor: colors.white, borderRadius: 20, padding: 17, borderWidth: 1, borderColor: colors.line, gap: 9 }, progressTitle: { color: colors.ink, fontWeight: '800' }, progressValue: { color: colors.orange, fontSize: 25, fontWeight: '900' }, progressTrack: { height: 8, borderRadius: 5, backgroundColor: '#E8E4DA', overflow: 'hidden' }, progressFill: { height: '100%', backgroundColor: colors.orange, borderRadius: 5 }, goalDates: { color: colors.muted, fontSize: 11 },
+  absenceCard: { backgroundColor: '#F5DCD7', borderRadius: 20, padding: 17, gap: 6, borderWidth: 1, borderColor: '#EABEB6' }, absenceTitle: { color: '#762C25', fontSize: 17, fontWeight: '900' }, absenceText: { color: '#81443E', lineHeight: 20 }, absenceLink: { color: colors.red, fontWeight: '900', marginTop: 3 },
+  checkInCard: { backgroundColor: colors.white, borderRadius: 24, padding: 19, borderWidth: 1, borderColor: colors.line, gap: 11 }, checkInTitle: { color: colors.ink, fontSize: 21, lineHeight: 27, fontWeight: '900' }, checkInText: { color: colors.muted, lineHeight: 21 }, photoRow: { flexDirection: 'row', gap: 10 }, photoSlot: { flex: 1, aspectRatio: 1.1, borderRadius: 16, backgroundColor: '#ECE9E1', overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }, photo: { width: '100%', height: '100%' }, photoPressable: { width: '100%', height: '100%' }, deletePhotoHint: { position: 'absolute', top: 7, right: 7, backgroundColor: 'rgba(32,33,30,.75)', color: 'white', borderRadius: 7, paddingHorizontal: 7, paddingVertical: 3, fontSize: 9, fontWeight: '800' }, photoPlaceholder: { color: '#B2AFA6', fontSize: 28, fontWeight: '900' }, photoCaption: { position: 'absolute', bottom: 7, left: 7, backgroundColor: 'rgba(32,33,30,.75)', color: '#fff', borderRadius: 7, paddingHorizontal: 7, paddingVertical: 3, fontSize: 10, fontWeight: '800' }, encouragement: { color: colors.green, fontWeight: '700', lineHeight: 21, fontStyle: 'italic' }, restCard: { backgroundColor: '#ECEAE4', borderRadius: 20, padding: 18, gap: 6 }, restTitle: { color: colors.ink, fontWeight: '900', fontSize: 18 },
+  actionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, actionButton: { width: '48.5%', minHeight: 60, borderRadius: 16, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.line, padding: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, actionButtonText: { color: colors.ink, fontWeight: '800', fontSize: 13 }, actionArrow: { color: colors.orange, fontWeight: '900' },
+  timelineItem: { flexDirection: 'row', gap: 12, paddingVertical: 5 }, timelineDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: colors.orange, marginTop: 6 }, timelineText: { color: colors.ink, lineHeight: 20, fontSize: 13 }, timelineDate: { color: '#99978F', fontSize: 10, marginTop: 3 },
+  recordRow: { backgroundColor: colors.white, borderRadius: 18, padding: 13, borderWidth: 1, borderColor: colors.line, flexDirection: 'row', alignItems: 'center', gap: 13 }, recordDate: { width: 48, height: 48, borderRadius: 14, backgroundColor: '#E9E6DE', alignItems: 'center', justifyContent: 'center' }, recordDateDone: { backgroundColor: colors.orange }, recordDateAbsent: { backgroundColor: colors.red }, recordDay: { color: colors.ink, fontSize: 17, fontWeight: '900' }, recordMonth: { color: colors.muted, fontSize: 9 }, recordDayOn: { color: '#fff' }, recordTitle: { color: colors.ink, fontWeight: '800' }, recordMeta: { color: colors.muted, fontSize: 11, marginTop: 3 }, legend: { flexDirection: 'row', gap: 14 }, legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 }, legendDot: { width: 8, height: 8, borderRadius: 4 }, legendText: { color: colors.muted, fontSize: 11 },
+  archiveCard: { backgroundColor: colors.white, borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 17, gap: 7 }, archiveTitle: { color: colors.ink, fontWeight: '900', fontSize: 18 },
+  settingsCard: { backgroundColor: colors.white, borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 17, gap: 10 }, settingsTitle: { color: colors.ink, fontWeight: '900', fontSize: 16 }, deletionCard: { backgroundColor: colors.orangePale, borderRadius: 20, padding: 17, gap: 8 },
+  statusPill: { alignSelf: 'flex-start', borderRadius: 99, backgroundColor: colors.orange, paddingHorizontal: 10, paddingVertical: 5 }, statusDone: { backgroundColor: colors.green }, statusAbandoned: { backgroundColor: colors.red }, statusPaused: { backgroundColor: '#8B7049' }, statusText: { color: '#fff', fontSize: 10, fontWeight: '900' },
+  primaryButton: { minHeight: 52, borderRadius: 16, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 17, marginTop: 3 }, primaryButtonText: { color: '#fff', fontWeight: '900', fontSize: 15 }, secondaryButton: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 12, backgroundColor: '#EAE7DF', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 13, paddingVertical: 8 }, secondaryButtonText: { color: colors.ink, fontWeight: '800', fontSize: 12 }, dangerText: { color: colors.red }, pressed: { opacity: 0.78, transform: [{ scale: 0.99 }] }, disabled: { opacity: 0.42 },
+  tabBar: { minHeight: 66, paddingTop: 8, paddingBottom: Platform.OS === 'ios' ? 7 : 8, flexDirection: 'row', backgroundColor: colors.white, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line }, tab: { flex: 1, alignItems: 'center', gap: 3 }, tabIcon: { color: '#9B9991', fontSize: 19, fontWeight: '900' }, tabLabel: { color: '#9B9991', fontSize: 9, fontWeight: '700' }, tabOn: { color: colors.orange },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(24,24,21,.52)', justifyContent: 'flex-end', padding: 14 }, actionModal: { backgroundColor: colors.paper, padding: 20, borderRadius: 25, gap: 13, maxHeight: '86%' }, noticeCard: { backgroundColor: colors.paper, padding: 23, borderRadius: 25, gap: 13, marginBottom: '45%', alignItems: 'stretch' }, noticeMark: { width: 42, height: 42, borderRadius: 14, backgroundColor: colors.orangePale, alignItems: 'center', justifyContent: 'center' }, noticeMarkText: { color: colors.orange, fontWeight: '900', fontSize: 19 }, modalTitle: { color: colors.ink, fontWeight: '900', fontSize: 21 }, modalText: { color: colors.muted, lineHeight: 22 }, modalIntro: { color: colors.muted, lineHeight: 21 }, modalClose: { color: colors.muted, fontSize: 18 }, segment: { flexDirection: 'row', padding: 4, borderRadius: 13, backgroundColor: '#E7E4DC' }, segmentButton: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 10 }, segmentButtonOn: { backgroundColor: colors.white }, segmentText: { color: colors.muted, fontSize: 12, fontWeight: '800' }, segmentTextOn: { color: colors.orange },
+  busy: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(247,245,239,.88)', alignItems: 'center', justifyContent: 'center', zIndex: 20 }, busyCard: { backgroundColor: colors.white, borderRadius: 20, borderWidth: 1, borderColor: colors.line, padding: 22, gap: 12, alignItems: 'center', maxWidth: 290 }, busyText: { color: colors.ink, fontWeight: '800', textAlign: 'center' },
 });

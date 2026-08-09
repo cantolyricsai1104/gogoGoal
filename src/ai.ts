@@ -1,0 +1,69 @@
+import { File } from 'expo-file-system';
+
+import { CheckInPhoto, RunningAssessment, RunningPlanDraft } from './domain';
+
+type RemotePlan = Pick<RunningPlanDraft, 'title' | 'summary' | 'weekdays' | 'minutesPerRun' | 'cycleWeeks' | 'targetRate'>;
+type EncouragementResult = { text: string; analysis: CheckInPhoto['analysis'] };
+
+const fallbackMessages = [
+  '你已經出發了，今天的承諾正在成形。',
+  '很好，保持舒服節奏，把今天完成。',
+  '這一步有被記錄下來，繼續穩穩前進。',
+  '你正在兌現對自己的承諾，做得好。',
+];
+
+function backendUrl(): string | undefined {
+  return process.env.EXPO_PUBLIC_GO_GOAL_AI_URL?.trim() || undefined;
+}
+
+export function isAiBackendConfigured(): boolean {
+  return Boolean(backendUrl());
+}
+
+async function post<T>(body: object): Promise<T> {
+  const url = backendUrl();
+  if (!url) throw new Error('AI backend is not configured');
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`AI backend returned ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+export async function improvePlanWithGemini(assessment: RunningAssessment, fallback: RunningPlanDraft): Promise<RunningPlanDraft> {
+  try {
+    const result = await post<RemotePlan>({ kind: 'running-plan', assessment });
+    return {
+      ...fallback,
+      title: result.title?.trim() || fallback.title,
+      summary: result.summary?.trim() || fallback.summary,
+      weekdays: result.weekdays?.length ? result.weekdays : fallback.weekdays,
+      minutesPerRun: Math.min(120, Math.max(15, Number(result.minutesPerRun) || fallback.minutesPerRun)),
+      cycleWeeks: Math.min(16, Math.max(2, Number(result.cycleWeeks) || fallback.cycleWeeks)),
+      targetRate: Math.min(1, Math.max(0.5, Number(result.targetRate) || fallback.targetRate)),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+export async function encouragePhoto(uri: string, enabled: boolean): Promise<EncouragementResult> {
+  if (!enabled) return { text: '相片已安全記錄。繼續完成今天的承諾。', analysis: 'disabled' };
+  try {
+    const file = new File(uri);
+    const imageBase64 = await file.base64();
+    const result = await post<{ text?: string }>({
+      kind: 'photo-encouragement',
+      imageBase64,
+      mimeType: uri.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg',
+      constraints: 'Traditional Chinese. One short positive exercise encouragement. Do not infer identity, age, gender, body shape, health, emotion, or discuss other people.',
+    });
+    const text = result.text?.trim();
+    if (!text) throw new Error('Empty encouragement');
+    return { text: text.slice(0, 80), analysis: 'gemini' };
+  } catch {
+    return { text: fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)], analysis: 'fallback' };
+  }
+}
