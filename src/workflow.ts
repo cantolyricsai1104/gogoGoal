@@ -2,6 +2,7 @@ import {
   Account,
   CheckInPhoto,
   GoalEvent,
+  PlanWeek,
   RecoveryType,
   RunRecord,
   RunningAssessment,
@@ -11,6 +12,7 @@ import {
   Weekday,
 } from './domain';
 import { addDays, dateKeyInZone, minutesInZone, nextMonday, weekdayForDateKey } from './time';
+import { InitialCoachingWorkflow, onboardingFromLegacyAssessment } from './coaching';
 
 export type WorkflowResult<T> = { ok: true; value: T; message: string } | { ok: false; message: string };
 
@@ -40,6 +42,50 @@ function recordsBetween(startDate: string, endDate: string, weekdays: Weekday[])
   return records;
 }
 
+function recordsFromInitialPlan(startDate: string, endDate: string, weeks: PlanWeek[]): RunRecord[] {
+  const records = new Map<string, RunRecord>();
+  for (const week of weeks) {
+    const weekStart = addDays(startDate, (week.weekNumber - 1) * 7);
+    const weekStartDay = weekdayForDateKey(weekStart);
+    for (const session of week.sessions) {
+      if (session.type === 'REST') continue;
+      const offset = (session.weekday - weekStartDay + 7) % 7;
+      const date = addDays(weekStart, offset);
+      if (date > endDate) continue;
+      records.set(date, { id: id('run'), date, status: 'planned', photos: [], note: session.title });
+    }
+  }
+  return [...records.values()].sort((left, right) => left.date.localeCompare(right.date));
+}
+
+function revisePlanWeeks(weeks: PlanWeek[] | undefined, weekdays: Weekday[], minutesPerRun: number): PlanWeek[] | undefined {
+  if (!weeks) return undefined;
+  const sortedDays = [...weekdays].sort((left, right) => left - right);
+  return weeks.map((week) => {
+    const templates = week.sessions.filter((session) => session.type !== 'REST');
+    if (!templates.length) return week;
+    const sessions = sortedDays.map((weekday, index) => {
+      const template = templates[Math.min(index, templates.length - 1)];
+      const type = index === sortedDays.length - 1 && sortedDays.length > 1 ? 'LONG_EASY_RUN' as const : template.type;
+      const activeMinutes = Math.max(5, minutesPerRun - 10);
+      const instructions = type === 'RUN_WALK'
+        ? ['先快步行 5 分鐘熱身。', `在餘下約 ${activeMinutes} 分鐘內，以舒服的慢跑和步行交替完成，不追速度。`, '最後慢步行至呼吸平穩。']
+        : ['先快步行 5 分鐘熱身。', `以能說完整句子的速度完成約 ${activeMinutes} 分鐘；需要時可加入步行。`, '最後慢步行至呼吸平穩。'];
+      return {
+        ...template,
+        id: id(`week-${week.weekNumber}-session`),
+        weekday,
+        type,
+        title: `${type === 'LONG_EASY_RUN' ? '較長的輕鬆跑走' : type === 'RUN_WALK' ? '輕鬆跑走交替' : '舒服連續慢跑'} ${minutesPerRun} 分鐘`,
+        totalMinutes: minutesPerRun,
+        instructions,
+        easierFallback: `把總時間縮短至 ${Math.max(10, minutesPerRun - 10)} 分鐘，並增加步行段落。`,
+      };
+    });
+    return { ...week, sessions, estimatedTotalMinutes: sessions.reduce((total, session) => total + session.totalMinutes, 0) };
+  });
+}
+
 function mapGoal(account: Account, goalId: string, updater: (goal: RunningGoal) => RunningGoal): Account | null {
   const goal = account.goals.find((item) => item.id === goalId);
   if (!goal) return null;
@@ -48,43 +94,59 @@ function mapGoal(account: Account, goalId: string, updater: (goal: RunningGoal) 
 
 export class RunningCommitmentWorkflow {
   createDraft(assessment: RunningAssessment, now: Date): RunningPlanDraft {
-    const safetyBlocked = hasSafetyRisk(assessment);
+    const plan = new InitialCoachingWorkflow().createFallbackPlan(onboardingFromLegacyAssessment(assessment), now);
     return {
+      ...plan,
       id: id('draft'),
-      createdAt: now.toISOString(),
       assessment,
       title: '建立穩定跑步習慣',
-      summary: safetyBlocked
+      summary: hasSafetyRisk(assessment)
         ? '你的安全篩查出現需要注意的項目。請先諮詢醫生或合資格專業人士，再建立跑步承諾。'
         : planSummary(assessment),
-      weekdays: [...assessment.availableDays].sort() as Weekday[],
       minutesPerRun: assessment.minutesPerRun,
-      cycleWeeks: 8,
-      targetRate: 0.8,
-      safetyBlocked,
     };
   }
 
   saveDraft(account: Account, draft: RunningPlanDraft): Account {
-    return { ...account, drafts: [draft, ...account.drafts.filter((item) => item.id !== draft.id)] };
+    return { ...account, drafts: [draft] };
   }
 
   commit(account: Account, draft: RunningPlanDraft, now: Date): WorkflowResult<Account> {
     if (draft.safetyBlocked) return { ok: false, message: '安全篩查尚未通過，不能建立跑步承諾。' };
+    const planValidation = new InitialCoachingWorkflow().validatePlan(draft.submission, draft);
+    if (!planValidation.ok) return { ok: false, message: `計畫尚未通過安全驗證：${planValidation.errors[0]}` };
     if (account.goals.some((goal) => goal.status === 'active' || goal.status === 'paused')) {
       return { ok: false, message: '你已有一個進行中的 Running 目標。請先處理原有承諾。' };
     }
     if (!draft.weekdays.length) return { ok: false, message: '請至少選擇一個跑步日。' };
     const startDate = dateKeyInZone(now, account.timezone);
     const endDate = addDays(startDate, draft.cycleWeeks * 7 - 1);
+    const committedWeeks = draft.weeks.map((week) => ({
+      ...week,
+      status: week.weekNumber === 1 ? 'COMMITTED' as const : 'PLANNED' as const,
+      sessions: week.sessions.map((session) => ({
+        ...session,
+        status: week.weekNumber === 1 ? 'COMMITTED' as const : 'PLANNED' as const,
+      })),
+    }));
     const version: RunningPlanVersion = {
       id: id('plan'),
+      schemaVersion: draft.schemaVersion,
+      version: draft.planVersion,
+      status: 'COMMITTED',
       createdAt: now.toISOString(),
+      committedAt: now.toISOString(),
       effectiveFrom: startDate,
+      source: draft.source,
       weekdays: draft.weekdays,
       minutesPerRun: draft.minutesPerRun,
       summary: draft.summary,
       reason: '首次承諾',
+      goalSummary: draft.goalSummary,
+      coachingSummary: draft.coachingSummary,
+      reasoningSummary: draft.reasoningSummary,
+      phases: draft.phases,
+      weeks: committedWeeks,
     };
     const goal: RunningGoal = {
       id: id('goal'),
@@ -97,7 +159,7 @@ export class RunningCommitmentWorkflow {
       cycleWeeks: draft.cycleWeeks,
       targetRate: draft.targetRate,
       planVersions: [version],
-      records: recordsBetween(startDate, endDate, draft.weekdays),
+      records: recordsFromInitialPlan(startDate, endDate, committedWeeks),
       events: [event('committed', `已承諾 ${draft.cycleWeeks} 週跑步計畫，目標完成率 ${Math.round(draft.targetRate * 100)}%。`, now)],
     };
     return {
@@ -208,10 +270,31 @@ export class RunningCommitmentWorkflow {
     const effectiveFrom = nextMonday(dateKeyInZone(now, account.timezone));
     const updated = mapGoal(account, goalId, (goal) => {
       if (goal.status !== 'active') return goal;
-      const version: RunningPlanVersion = { id: id('plan'), createdAt: now.toISOString(), effectiveFrom, weekdays, minutesPerRun, summary, reason: reason.trim() };
+      const previousVersion = goal.planVersions[goal.planVersions.length - 1];
+      const versionId = id('plan');
+      const version: RunningPlanVersion = {
+        id: versionId,
+        schemaVersion: previousVersion?.schemaVersion,
+        version: (previousVersion?.version ?? goal.planVersions.length) + 1,
+        status: 'COMMITTED',
+        createdAt: now.toISOString(),
+        committedAt: now.toISOString(),
+        effectiveFrom,
+        source: previousVersion?.source,
+        weekdays,
+        minutesPerRun,
+        summary,
+        reason: reason.trim(),
+        goalSummary: previousVersion?.goalSummary,
+        coachingSummary: previousVersion?.coachingSummary,
+        reasoningSummary: previousVersion?.reasoningSummary,
+        phases: previousVersion?.phases,
+        weeks: revisePlanWeeks(previousVersion?.weeks, weekdays, minutesPerRun),
+      };
       const historical = goal.records.filter((record) => record.date < effectiveFrom);
       const future = recordsBetween(effectiveFrom, goal.endDate, weekdays);
-      return { ...goal, planVersions: [...goal.planVersions, version], records: [...historical, ...future], events: [...goal.events, event('revised', `計畫將於 ${effectiveFrom} 更新：${reason.trim()}`, now)] };
+      const versions = goal.planVersions.map((item, index) => index === goal.planVersions.length - 1 ? { ...item, supersededBy: versionId } : item);
+      return { ...goal, planVersions: [...versions, version], records: [...historical, ...future], events: [...goal.events, event('revised', `計畫將於 ${effectiveFrom} 更新：${reason.trim()}`, now)] };
     });
     if (!updated) return { ok: false, message: '找不到目標。' };
     const goal = updated.goals.find((item) => item.id === goalId);

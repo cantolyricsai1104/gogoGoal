@@ -27,16 +27,18 @@ Go Go Goal 是一個把目標變成正式承諾的 App。使用者不能直接�
 - 第一版每位使用者同時只有 **1 個進行中的 Running 目標**。
 - 使用者可以修改每週跑步日、時長或目標難度，但必須填原因、保留版本歷史，而且一律從下一週生效。
 
-### Keep Fit > Running 計畫
+### Keep Fit > Running Initial Coaching Plan
 
 - Keep Fit 是首頁第一個目標類別。
 - Running 是 Keep Fit 中第一個可建立承諾的方式。
-- 使用者先和 Gemini Flash 對話，完成必要資料收集及安全篩查。
-- 需要收集的資料：年齡區間、近 4 週運動／跑步習慣、可跑日子、每次可投入時間、想提升的跑步能力，以及受傷或健康限制。
+- 使用者完成五步結構化 onboarding：目標、跑步能力、最近四週活動量、Availability 及安全篩查。
+- 跑步資料容許 Exact、Approximate 或 Unknown；Availability 不等於 Commitment。
 - 不將體重、身形相片或精確住址設為必填資料。
 - 若安全篩查出現警示（例如近期胸痛、暈眩、已知心肺／關節問題、醫生限制運動），不自行生成跑步訓練處方，而是建議先諮詢專業人士。
-- 其他使用者由保守的跑走交替計畫開始。
-- Gemini 先生成可修改的計畫草案；使用者明確按下 **「我承諾這個計畫」** 後，計畫才生效。
+- 其他使用者由 Gemini 產生完整八週 Initial Coaching Plan；每課都有初學者可理解的分步指示、RPE、說話測試及較輕鬆版本。
+- Plan Review 顯示 Overview、Coach reasoning、Phase Roadmap 及完整八週內容；所有輸出先通過確定性 validator。
+- 使用者可以在承諾前要求較輕鬆、增加一點挑戰或調整日期，並先看 Before → After。
+- 使用者明確按下 **「開始我的計畫」** 後，Week 1 才成為 Committed，Week 2–8 為 Planned。
 - 目標建立時鎖定週期與達標率，例如 8 週內完成至少 80% 的預定跑步日。
 - 週期結束由後端自動判定：達標可標為完成；未達標可延長、調整下一週計畫或放棄並歸檔。
 
@@ -100,7 +102,9 @@ V1 不加入好友、公開排行榜、照片分享或社群動態。日後若�
 
 ### 進階智慧功能
 
-- 根據缺席趨勢主動建議降低強度或更換跑步日。
+- 完整 Adaptive Coaching Loop：post-run feedback、結構化 missed reason、Weekly Readiness、Coach reasoning、重新計算及 Recommit。
+- 以 Training／Recovery／Scheduling／Behaviour／Safety 分類問題，輸出 PROGRESS／MAINTAIN／RECOVER／RESCHEDULE／SAFETY_HOLD。
+- 根據缺席趨勢主動建議降低強度或更換跑步日，但缺席原因只作 signal，不直接等於 Coach Decision。
 - 依完成率產生週報、月報與可視化進度洞察。
 - 以更多可選訊號改善計畫建議，例如穿戴裝置資料；必須另行取得授權，且不能作為強制打卡的唯一條件。
 - 更個人化的 Gemini 鼓勵語氣與教練風格，但仍需保留安全與不作敏感推論的限制。

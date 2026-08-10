@@ -1,9 +1,22 @@
 import { File } from 'expo-file-system';
 
-import { CheckInPhoto, RunningAssessment, RunningPlanDraft } from './domain';
+import { CheckInPhoto, OnboardingSubmission, PlanPhase, PlanWeek, RunningAssessment, RunningPlanDraft, Weekday } from './domain';
+import { InitialCoachingWorkflow, PlanFeedback } from './coaching';
 
 type RemotePlan = Pick<RunningPlanDraft, 'title' | 'summary' | 'weekdays' | 'minutesPerRun' | 'cycleWeeks' | 'targetRate'>;
 type EncouragementResult = { text: string; analysis: CheckInPhoto['analysis'] };
+type RemoteInitialPlan = {
+  title: string;
+  summary: string;
+  goalSummary: string;
+  feasibility: RunningPlanDraft['feasibility'];
+  coachingSummary: string;
+  reasoningSummary: string;
+  recommendedDays: Weekday[];
+  estimatedWeeklyMinutes: number;
+  phases: PlanPhase[];
+  weeks: PlanWeek[];
+};
 
 const fallbackMessages = [
   '你已經出發了，今天的承諾正在成形。',
@@ -23,13 +36,20 @@ export function isAiBackendConfigured(): boolean {
 async function post<T>(body: object): Promise<T> {
   const url = backendUrl();
   if (!url) throw new Error('AI backend is not configured');
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) throw new Error(`AI backend returned ${response.status}`);
-  return response.json() as Promise<T>;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`AI backend returned ${response.status}`);
+    return response.json() as Promise<T>;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function improvePlanWithGemini(assessment: RunningAssessment, fallback: RunningPlanDraft): Promise<RunningPlanDraft> {
@@ -46,6 +66,56 @@ export async function improvePlanWithGemini(assessment: RunningAssessment, fallb
     };
   } catch {
     return fallback;
+  }
+}
+
+function mergeInitialPlan(remote: RemoteInitialPlan, fallback: RunningPlanDraft, planVersion: number): RunningPlanDraft | null {
+  const candidate: RunningPlanDraft = {
+    ...fallback,
+    id: fallback.id,
+    planVersion,
+    createdAt: new Date().toISOString(),
+    source: 'gemini',
+    title: remote.title,
+    summary: remote.summary,
+    goalSummary: remote.goalSummary,
+    feasibility: remote.feasibility,
+    coachingSummary: remote.coachingSummary,
+    reasoningSummary: remote.reasoningSummary,
+    phases: remote.phases,
+    weeks: remote.weeks,
+    weekdays: remote.recommendedDays,
+    estimatedWeeklyMinutes: remote.estimatedWeeklyMinutes,
+    minutesPerRun: Math.round(remote.estimatedWeeklyMinutes / Math.max(1, remote.recommendedDays.length)),
+  };
+  return new InitialCoachingWorkflow().validatePlan(candidate.submission, candidate).ok ? candidate : null;
+}
+
+export async function generateInitialPlanWithGemini(submission: OnboardingSubmission, fallback: RunningPlanDraft): Promise<RunningPlanDraft> {
+  try {
+    const remote = await post<RemoteInitialPlan>({ kind: 'initial-coaching-plan', submission });
+    return mergeInitialPlan(remote, fallback, fallback.planVersion) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export async function requestInitialPlanRevision(
+  draft: RunningPlanDraft,
+  feedback: Exclude<PlanFeedback, 'SUITABLE'>,
+  reason: string,
+): Promise<RunningPlanDraft | null> {
+  try {
+    const remote = await post<RemoteInitialPlan>({
+      kind: 'initial-coaching-revision',
+      submission: draft.submission,
+      currentPlan: draft,
+      feedback,
+      reason: reason.trim(),
+    });
+    return mergeInitialPlan(remote, draft, draft.planVersion + 1);
+  } catch {
+    return null;
   }
 }
 

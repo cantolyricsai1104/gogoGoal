@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { Account, AppData } from './domain';
+import { Account, AppData, RunningPlanDraft } from './domain';
 import { isValidTimezone } from './time';
 
 const STORAGE_KEY = '@go-go-goal/v1';
@@ -13,7 +13,13 @@ export async function loadAppData(): Promise<AppData> {
   const parsed = JSON.parse(raw) as Partial<AppData>;
   return {
     sessionAccountId: typeof parsed.sessionAccountId === 'string' ? parsed.sessionAccountId : undefined,
-    accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+    accounts: Array.isArray(parsed.accounts) ? parsed.accounts.map((account) => ({
+      ...account,
+      drafts: Array.isArray(account.drafts)
+        ? account.drafts.filter((draft): draft is RunningPlanDraft => draft?.schemaVersion === 'initial-coaching-plan/v1' && Array.isArray(draft.weeks))
+        : [],
+      goals: Array.isArray(account.goals) ? account.goals : [],
+    })) : [],
   };
 }
 

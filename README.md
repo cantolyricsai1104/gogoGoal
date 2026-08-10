@@ -6,7 +6,12 @@ Go Go Goal 是以繁體中文為預設的 React Native／Expo App。V1 聚焦 **
 
 - 本機帳戶登入與私人 Workspace adapter。
 - Keep Fit 類別；Running 可使用，其他運動方式顯示「即將推出」。
-- 跑步背景資料、健康安全篩查、保守計畫草案與明確承諾。
+- 五步 Running onboarding：目標、跑步能力、最近四週活動量、Availability 與安全篩查；答案會自動保存在本機 Workspace。
+- 跑步能力資料支援 Exact、Approximate 與 Unknown，不強迫使用者製造假精確數字。
+- Gemini Flash 產生完整八週 Initial Coaching Plan，包括 Overview、安排理由、Phase Roadmap 與每一課的繁體中文步驟、RPE、說話測試及較輕鬆版本。
+- Gemini 計畫必須通過後端與 App 的確定性驗證；不可用、超時或輸出無效時，顯示清楚標示的安全基本計畫。
+- Plan Review 支援受控調整與 Before → After；增加挑戰不會繞過安全、時間、頻率或恢復限制。
+- 明確承諾後只有 Week 1 為 Committed，Week 2–8 為 Planned；計畫版本與 superseded history 會保留。
 - 每位使用者同時只可有一個進行中的 Running 目標。
 - 目標不能直接刪除；支援下週修改、暫停／恢復、完成與放棄歸檔，並保留原因時間軸。
 - 同一曆日兩張相片打卡、至少 15 分鐘間隔、第一張最遲 23:45。
@@ -56,9 +61,11 @@ EXPO_PUBLIC_GO_GOAL_AI_URL=http://10.0.2.2:8787/go-go-goal
 
 其中 `10.0.2.2` 是 Android Emulator 存取開發電腦的特殊位址；iOS Simulator 改用 `127.0.0.1`。修改 `.env.local` 後必須重新啟動 Metro。
 
-後端接受兩種 JSON 請求：
+後端接受四種 JSON 請求：
 
-- `kind: "running-plan"`：接收安全篩查後的 Running assessment，回傳可修改的標題、摘要、跑步日、時長、週期及達標率。
+- `kind: "initial-coaching-plan"`：接收最小必要 onboarding submission，回傳完整八週 structured plan。
+- `kind: "initial-coaching-revision"`：接收未承諾 Draft、受控 feedback 及選填原因，回傳完整的修訂草案；原草案在使用者確認前不會被替換。
+- `kind: "running-plan"`：舊 contract compatibility；新 UI 不再使用。
 - `kind: "photo-encouragement"`：接收經使用者同意的 base64 相片及 MIME type，回傳 `{"text":"簡短鼓勵"}`。
 
 正式後端必須自行保存 API 金鑰、驗證帳戶、限制速率、控制影像保留時間，並禁止模型推測身分、年齡、性別、體型、健康或情緒。Gemini 不能控制打卡、缺席或目標狀態。
@@ -73,10 +80,10 @@ npm run typecheck
 npx expo export --platform ios --output-dir /private/tmp/go-go-goal-ios
 ```
 
-核心規則由單一 `RunningCommitmentWorkflow` 執行。測試涵蓋安全警示、唯一進行中目標、15 分鐘雙相片限制、23:45 截止、午夜缺席、補救紀錄、下週修改及 30 天暫停上限。
+Initial Coaching 規則由 `InitialCoachingWorkflow` 執行，承諾及打卡規則由 `RunningCommitmentWorkflow` 執行。測試涵蓋完整八週 plan、phase coverage、初學者 instructions、安全／未成年 gate、Availability／時間限制、Plan diff、Committed／Planned 狀態、版本歷史、唯一進行中目標、15 分鐘雙相片限制、23:45 截止、午夜缺席、補救紀錄、下週修改及 30 天暫停上限。
 
 ## 原型與正式發布的邊界
 
 目前帳戶及資料 adapter 儲存在裝置本機，適合 V1 原型驗證；正式上架前應替換成有身分驗證的後端資料庫與私有媒體儲存。App 關閉時的伺服器端午夜結算、跨裝置同步與遠端推播亦需要正式後端排程器。
 
-完整產品規格位於 `.scratch/go-go-goal-running-v1/spec.md`，未納入 V1 的方向位於 `V2_features.md`。
+完整 Initial Coaching Plan 規格位於 `.scratch/go-go-goal-initial-coaching-plan-v1/spec.md`，其 11 張本地 tickets 位於相鄰的 `tickets/` 目錄；未納入 V1 的方向位於 `V2_features.md`。

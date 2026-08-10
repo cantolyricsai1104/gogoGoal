@@ -91,6 +91,14 @@ test('修改計畫必須有原因且從下一週生效', () => {
   const revised = workflow.revise(current, current.goals[0].id, [2, 4], 25, '新節奏', '工作時間改變', new Date('2026-08-11T01:00:00.000Z'));
   assert.equal(revised.ok, true);
   assert.equal(revised.ok && revised.value.goals[0].planVersions[1].effectiveFrom, '2026-08-17');
+  assert.equal(revised.ok && revised.value.goals[0].planVersions[1].version, 2);
+  assert.equal(revised.ok && revised.value.goals[0].planVersions[0].supersededBy, revised.ok && revised.value.goals[0].planVersions[1].id);
+  if (!revised.ok) return;
+  const revisedWeeks = revised.value.goals[0].planVersions[1].weeks ?? [];
+  const revisedTraining = revisedWeeks.flatMap((week) => week.sessions.filter((session) => session.type !== 'REST'));
+  assert.ok(revisedTraining.length > 0);
+  assert.ok(revisedTraining.every((session) => [2, 4].includes(session.weekday)));
+  assert.ok(revisedTraining.every((session) => session.totalMinutes === 25));
 });
 
 test('暫停不可超過三十天且放棄必須填原因', () => {

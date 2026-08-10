@@ -18,19 +18,22 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
-import { encouragePhoto, improvePlanWithGemini } from './src/ai';
+import { encouragePhoto, generateInitialPlanWithGemini, requestInitialPlanRevision } from './src/ai';
 import {
   Account,
   AppData,
-  defaultAssessment,
+  defaultOnboardingSubmission,
+  OnboardingSubmission,
   RecoveryType,
   RunRecord,
-  RunningAssessment,
   RunningGoal,
+  RunningOnboardingDraft,
   RunningPlanDraft,
   Weekday,
   weekdayNames,
 } from './src/domain';
+import { InitialCoachingWorkflow, PlanFeedback } from './src/coaching';
+import { InitialPlanReviewScreen, PendingPlanRevision, RunningOnboardingScreen } from './src/coaching-ui';
 import { cleanupExpiredPhotos, deleteAllAccountPhotos, deleteStoredPhoto, pickAndStorePhoto } from './src/media';
 import { cancelRunningReminders, requestNotificationPermission, scheduleRunningReminders } from './src/notifications';
 import { emptyAppData, loadAppData, loginLocally, replaceAccount, saveAppData } from './src/storage';
@@ -41,6 +44,7 @@ type Screen = 'workspace' | 'keep-fit' | 'assessment' | 'draft' | 'goal' | 'cale
 type Notice = { title: string; message: string } | null;
 
 const workflow = new RunningCommitmentWorkflow();
+const coachingWorkflow = new InitialCoachingWorkflow();
 const allDays: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
 const statusLabel: Record<RunningGoal['status'], string> = { active: '進行中', paused: '已暫停', completed: '已完成', abandoned: '已放棄' };
 const runStatusLabel: Record<RunRecord['status'], string> = { planned: '待完成', in_progress: '已開始', completed: '已完成', absent: '缺席', skipped: '已跳過' };
@@ -61,10 +65,11 @@ function AppContent() {
   const [draftId, setDraftId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
+  const [pendingRevision, setPendingRevision] = useState<PendingPlanRevision | null>(null);
 
   const account = useMemo(() => data.accounts.find((item) => item.id === data.sessionAccountId) ?? null, [data]);
   const selectedGoal = account?.goals.find((goal) => goal.id === selectedGoalId) ?? account?.goals.find((goal) => goal.status === 'active' || goal.status === 'paused') ?? null;
-  const draft = account?.drafts.find((item) => item.id === draftId) ?? null;
+  const draft = account?.drafts.find((item) => item.id === draftId) ?? (screen === 'draft' ? account?.drafts[0] ?? null : null);
 
   useEffect(() => {
     loadAppData()
@@ -102,20 +107,42 @@ function AppContent() {
     setScreen('goal');
   };
 
-  const saveDraft = async (assessment: RunningAssessment) => {
+  const saveDraft = async (submission: OnboardingSubmission) => {
     if (!account) return;
-    setBusy('正在整理適合你的跑步節奏…');
-    const base = workflow.createDraft(assessment, new Date());
-    const nextDraft = base.safetyBlocked ? base : await improvePlanWithGemini(assessment, base);
+    setBusy('Coach 正在建立完整八週起始計畫…');
+    const base = coachingWorkflow.createFallbackPlan(submission, new Date());
+    const nextDraft = base.safetyBlocked ? base : await generateInitialPlanWithGemini(submission, base);
     updateAccount(workflow.saveDraft(account, nextDraft));
     setDraftId(nextDraft.id);
+    setPendingRevision(null);
     setBusy(null);
     setScreen('draft');
   };
 
+  const saveOnboardingDraft = (next: RunningOnboardingDraft) => {
+    if (!account) return;
+    updateAccount({ ...account, onboardingDraft: next });
+  };
+
+  const reviseInitialDraft = async (feedback: PlanFeedback, reason: string) => {
+    if (!draft) return;
+    if (feedback === 'SUITABLE') {
+      showMessage('很好。Coach 會保持目前的安全起點，只有你按下「開始我的計畫」後才正式承諾。', '這個程度保持不變');
+      return;
+    }
+    setBusy('Coach 正在評估你提出的調整…');
+    const revised = await requestInitialPlanRevision(draft, feedback, reason);
+    setBusy(null);
+    if (!revised) {
+      showMessage('原本的草案完全沒有被修改。請確認本機 Gemini 後端可用後再試。', '暫時未能產生安全調整');
+      return;
+    }
+    setPendingRevision({ draft: revised, difference: coachingWorkflow.comparePlans(draft, revised) });
+  };
+
   const finishCommit = async (nextPermission: Account['notificationPermission']) => {
     if (!account || !draft) return;
-    const prepared = { ...account, notificationPermission: nextPermission };
+    const prepared = { ...account, notificationPermission: nextPermission, onboardingDraft: undefined };
     const result = workflow.commit(prepared, draft, new Date());
     if (!result.ok) return showMessage(result.message, '尚未建立承諾');
     updateAccount(result.value);
@@ -209,15 +236,34 @@ function AppContent() {
   if (screen === 'keep-fit') {
     content = <KeepFitScreen onBack={() => setScreen('workspace')} onRunning={() => {
       const current = account.goals.find((goal) => goal.status === 'active' || goal.status === 'paused');
-      if (current) openGoal(current); else setScreen('assessment');
+      if (current) openGoal(current);
+      else if (account.drafts[0]) {
+        setDraftId(account.drafts[0].id);
+        setScreen('draft');
+      } else setScreen('assessment');
     }} />;
   } else if (screen === 'assessment') {
-    content = <AssessmentScreen onBack={() => setScreen('keep-fit')} onSubmit={saveDraft} />;
+    const onboardingDraft: RunningOnboardingDraft = account.onboardingDraft ?? {
+      currentStep: 0,
+      submission: defaultOnboardingSubmission,
+      updatedAt: new Date().toISOString(),
+    };
+    content = <RunningOnboardingScreen draft={onboardingDraft} onChange={saveOnboardingDraft} onBackRoot={() => setScreen('keep-fit')} onSubmit={saveDraft} />;
   } else if (screen === 'draft' && draft) {
-    content = <DraftScreen draft={draft} onBack={() => setScreen('assessment')} onChange={(next) => {
-      updateAccount(workflow.saveDraft(account, next));
-      setDraftId(next.id);
-    }} onCommit={commitDraft} />;
+    content = <InitialPlanReviewScreen
+      draft={draft}
+      pendingRevision={pendingRevision}
+      onBack={() => setScreen('assessment')}
+      onFeedback={reviseInitialDraft}
+      onCancelRevision={() => setPendingRevision(null)}
+      onConfirmRevision={() => {
+        if (!pendingRevision) return;
+        updateAccount(workflow.saveDraft(account, pendingRevision.draft));
+        setDraftId(pendingRevision.draft.id);
+        setPendingRevision(null);
+      }}
+      onCommit={commitDraft}
+    />;
   } else if (screen === 'goal' && selectedGoal) {
     content = <GoalScreen
       account={account}
@@ -332,24 +378,6 @@ function WorkspaceScreen({ account, onKeepFit, onOpen }: { account: Account; onK
 
 function KeepFitScreen({ onBack, onRunning }: { onBack: () => void; onRunning: () => void }) {
   return <ScreenShell title="Keep Fit" onBack={onBack}><Text style={styles.pageTitle}>你想用哪種方式保持健康？</Text><Text style={styles.pageIntro}>每種運動需要不同的承諾與驗證方式。V1 先把 Running 做好。</Text><Pressable onPress={onRunning} style={styles.runningCard}><Text style={styles.runningNumber}>01</Text><View style={styles.flex}><Text style={styles.runningTitle}>Running</Text><Text style={styles.runningText}>跑步日內完成兩張相片打卡，至少相隔 15 分鐘。</Text></View><Text style={styles.runningArrow}>→</Text></Pressable><ComingSoonCard title="Strength Training" /><ComingSoonCard title="Swimming" /><ComingSoonCard title="Cycling" /></ScreenShell>;
-}
-
-function AssessmentScreen({ onBack, onSubmit }: { onBack: () => void; onSubmit: (assessment: RunningAssessment) => void }) {
-  const [value, setValue] = useState(defaultAssessment);
-  const update = <K extends keyof RunningAssessment>(key: K, next: RunningAssessment[K]) => setValue((current) => ({ ...current, [key]: next }));
-  const toggleDay = (day: Weekday) => update('availableDays', value.availableDays.includes(day) ? value.availableDays.filter((item) => item !== day) : [...value.availableDays, day]);
-  const risks: Array<[keyof Pick<RunningAssessment, 'hasChestPain' | 'hasDizziness' | 'hasHeartOrLungCondition' | 'hasJointProblem' | 'hasMedicalRestriction'>, string]> = [
-    ['hasChestPain', '近期運動時曾胸痛'],
-    ['hasDizziness', '近期曾暈眩或失去平衡'],
-    ['hasHeartOrLungCondition', '已知心臟或肺部問題'],
-    ['hasJointProblem', '有會影響跑步的關節問題'],
-    ['hasMedicalRestriction', '醫生曾限制我運動'],
-  ];
-  return <ScreenShell title="Running 起點" onBack={onBack}><Text style={styles.kicker}>STEP 1 OF 2</Text><Text style={styles.pageTitle}>先定一個安全、做得到的節奏。</Text><Text style={styles.pageIntro}>只收集制定初步計畫需要的資料；不要求體重、外貌相片或精確位置。</Text><Field label="年齡區間" value={value.ageRange} onChangeText={(text) => update('ageRange', text)} /><Field label="近四週的運動情況" value={value.recentActivity} onChangeText={(text) => update('recentActivity', text)} multiline /><Text style={styles.fieldLabel}>每週可跑日子</Text><DayPicker days={value.availableDays} onToggle={toggleDay} /><Field label="每次可投入分鐘" value={String(value.minutesPerRun)} onChangeText={(text) => update('minutesPerRun', Math.max(0, Number(text) || 0))} keyboardType="number-pad" /><Field label="希望提升的能力" value={value.desiredAbility} onChangeText={(text) => update('desiredAbility', text)} multiline /><Field label="其他受傷或健康限制（可留空）" value={value.healthLimitations} onChangeText={(text) => update('healthLimitations', text)} multiline /><Text style={styles.sectionTitle}>快速安全篩查</Text><Text style={styles.helper}>如果任何一項是「有」，App 不會自行建立訓練處方。</Text>{risks.map(([key, label]) => <ToggleRow key={key} label={label} value={value[key]} onChange={(next) => update(key, next)} />)}<PrimaryButton label="產生可修改的計畫草案" onPress={() => value.availableDays.length && value.minutesPerRun >= 15 ? onSubmit(value) : Alert.alert('請檢查計畫資料', '請至少選一個跑步日，並安排每次至少 15 分鐘。')} /></ScreenShell>;
-}
-
-function DraftScreen({ draft, onBack, onChange, onCommit }: { draft: RunningPlanDraft; onBack: () => void; onChange: (draft: RunningPlanDraft) => void; onCommit: () => void }) {
-  return <ScreenShell title="計畫草案" onBack={onBack}><Text style={styles.kicker}>STEP 2 OF 2</Text><Text style={styles.pageTitle}>{draft.safetyBlocked ? '先處理安全疑慮。' : '這份草案要成為你的承諾嗎？'}</Text><View style={[styles.planCard, draft.safetyBlocked && styles.riskCard]}><Text style={styles.planCardLabel}>{draft.safetyBlocked ? '安全提醒' : 'GEMINI／本機安全草案'}</Text><Text style={styles.planCardTitle}>{draft.title}</Text><Text style={styles.planCardText}>{draft.summary}</Text></View>{draft.safetyBlocked ? <><Text style={styles.pageIntro}>請先向醫生或合資格專業人士確認適合的運動方式。獲得許可後，再回來重新完成篩查。</Text><SecondaryButton label="返回修改答案" onPress={onBack} /></> : <><Text style={styles.fieldLabel}>每週跑步日</Text><DayPicker days={draft.weekdays} onToggle={(day) => onChange({ ...draft, weekdays: draft.weekdays.includes(day) ? draft.weekdays.filter((item) => item !== day) : [...draft.weekdays, day] })} /><Field label="每次分鐘" value={String(draft.minutesPerRun)} keyboardType="number-pad" onChangeText={(text) => onChange({ ...draft, minutesPerRun: Math.max(15, Number(text) || 15) })} /><Field label="計畫說明" value={draft.summary} multiline onChangeText={(summary) => onChange({ ...draft, summary })} /><View style={styles.metricRow}><Metric value={`${draft.cycleWeeks} 週`} label="承諾週期" /><Metric value={`${Math.round(draft.targetRate * 100)}%`} label="達標門檻" /><Metric value={`${draft.weekdays.length} 天`} label="每週頻率" /></View><View style={styles.commitWarning}><Text style={styles.commitWarningTitle}>按下後不能直接刪除</Text><Text style={styles.commitWarningText}>你仍可暫停、完成或放棄，但每個選擇都需要留下原因並歸檔。</Text></View><PrimaryButton label="我承諾這個計畫" onPress={onCommit} /></>}</ScreenShell>;
 }
 
 function GoalScreen({ account, goal, onBack, onCheckIn, onDeletePhoto, onCalendar, onRevise, onPause, onResume, onAbandon, onComplete, onRecover }: {
