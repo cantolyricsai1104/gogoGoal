@@ -22,6 +22,12 @@ Go Go Goal 是以繁體中文為預設的 React Native／Expo App。V1 提供 **
 - 個人成長五步規劃：方向、專屬模板答案、情境與方式、排程、確認。八個方向各有 3–5 條選擇題，每題可選「其他」補充。
 - Gemini 草稿提供可編輯日期、時間和任務；Workspace 可同時保存多個個人成長計畫，依下一個到期任務排序，支援完成／略過／封存／刪除與未完成任務順延一週。
 - Gemini 暫時不可用時保留問卷草稿並提供重試，不靜默產生普通計畫；暫不做系統日曆同步或通知。
+
+## 部署 Gemini 後端（Render Free）
+
+Repository 內的 [render.yaml](render.yaml) 可用 Render Blueprint 建立免費 Node Web Service。Render Dashboard 連接這個 private GitHub Repository 後，選擇 **New → Blueprint**，確認服務名稱為 `gogo-goal-ai`，並在 Environment 裡設定 `GEMINI_API_KEY`；金鑰只放在 Render，不要提交到 GitHub。
+
+部署完成後，在 Expo 建置環境設定 `EXPO_PUBLIC_GO_GOAL_AI_URL=https://你的服務.onrender.com/go-go-goal`。Render Free 服務閒置後會休眠，首次重新請求可能需要等待約一分鐘；這個方案適合測試和個人使用。
 - 原始相片 90 天後自動清理；可長按刪除個別相片而保留文字紀錄。
 - 帳戶刪除的 30 天撤銷期與期滿本機資料清理。
 

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: gogo-goal-ai
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: node server/ai-server.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.1-flash-lite
+      - key: GO_GOAL_AI_HOST
+        value: 0.0.0.0
