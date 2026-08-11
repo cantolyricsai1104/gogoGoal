@@ -1,6 +1,7 @@
 import {
   Account,
   CheckInPhoto,
+  defaultGoalClassification,
   GoalEvent,
   PlanWeek,
   RecoveryType,
@@ -151,6 +152,7 @@ export class RunningCommitmentWorkflow {
     const goal: RunningGoal = {
       id: id('goal'),
       title: draft.title,
+      classification: draft.classification ?? draft.submission.goal.classification ?? { ...defaultGoalClassification },
       status: 'active',
       createdAt: draft.createdAt,
       committedAt: now.toISOString(),

@@ -1,11 +1,11 @@
 # Go Go Goal
 
-Go Go Goal 是以繁體中文為預設的 React Native／Expo App。V1 聚焦 **Keep Fit > Running**：使用者先建立安全、可修改的跑步計畫，明確承諾後，在每個跑步日以兩張相隔至少 15 分鐘的相片完成私人打卡。
+Go Go Goal 是以繁體中文為預設的 React Native／Expo App。V1 提供 **生命之輪 > 健康 > 運動 > Running**，以及 **生命之輪 > 個人成長** 的規劃流程：使用者以方向專屬選項建立目標，取得可修改的 Gemini 計畫草案，再確認保存。
 
 ## V1 已實作
 
 - 本機帳戶登入與私人 Workspace adapter。
-- Keep Fit 類別；Running 可使用，其他運動方式顯示「即將推出」。
+- 生命之輪八大類別；健康 > 運動 > Running 及個人成長規劃可使用，其他類別及運動方式顯示「即將推出」。
 - 五步 Running onboarding：目標、跑步能力、最近四週活動量、Availability 與安全篩查；答案會自動保存在本機 Workspace。
 - 跑步能力資料支援 Exact、Approximate 與 Unknown，不強迫使用者製造假精確數字。
 - Gemini Flash 產生完整八週 Initial Coaching Plan，包括 Overview、安排理由、Phase Roadmap 與每一課的繁體中文步驟、RPE、說話測試及較輕鬆版本。
@@ -19,6 +19,9 @@ Go Go Goal 是以繁體中文為預設的 React Native／Expo App。V1 聚焦 **
 - 依主時區安排 10:00 與 20:00 本機提醒；午夜後開啟 App 會結算缺席。
 - 缺席補登、跳過或重新安排，而且保留原始缺席事件。
 - Workspace 日曆、達標率與完整目標時間軸。
+- 個人成長五步規劃：方向、專屬模板答案、情境與方式、排程、確認。八個方向各有 3–5 條選擇題，每題可選「其他」補充。
+- Gemini 草稿提供可編輯日期、時間和任務；Workspace 可同時保存多個個人成長計畫，依下一個到期任務排序，支援完成／略過／封存／刪除與未完成任務順延一週。
+- Gemini 暫時不可用時保留問卷草稿並提供重試，不靜默產生普通計畫；暫不做系統日曆同步或通知。
 - 原始相片 90 天後自動清理；可長按刪除個別相片而保留文字紀錄。
 - 帳戶刪除的 30 天撤銷期與期滿本機資料清理。
 
@@ -55,7 +58,7 @@ App 不會保存 Gemini API 金鑰。若沒有設定後端，計畫與鼓勵會�
 
 ```bash
 GEMINI_API_KEY=your-private-key
-GEMINI_MODEL=gemini-3.5-flash
+GEMINI_MODEL=gemini-3.1-flash-lite
 EXPO_PUBLIC_GO_GOAL_AI_URL=http://10.0.2.2:8787/go-go-goal
 ```
 

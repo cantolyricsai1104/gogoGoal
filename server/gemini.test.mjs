@@ -20,6 +20,27 @@ const submission = {
   safety: { hasChestPain: false, hasDizziness: false, hasHeartOrLungCondition: false, hasRunningPain: false, hasMedicalRestriction: false },
 };
 
+const growthSubmission = {
+  schemaVersion: 'personal-growth-onboarding/v1',
+  classification: { category: 'personal_growth', subcategory: 'growth' },
+  focus: { primary: 'new_skill', secondary: ['focus_time'] }, // legacy input: server must omit it from Gemini context
+  outcome: '完成一個可以展示的小工具',
+  successDefinition: '有一個可以運作並能向朋友展示的作品',
+  currentLevel: 'starting',
+  cycleWeeks: 4,
+  weeklyMinutes: 90,
+  availableDays: [2, 4, 6],
+  timeByDay: { 2: '30_45', 4: '30_45', 6: '30_45' },
+  preferredFormats: ['practice', 'project'],
+  preferredLanguage: '繁體中文',
+  constraints: '只能晚上',
+  obstacles: '工作忙',
+  templateAnswers: { skill_category: 'coding', skill_outcome: 'small_project' },
+  templateOtherAnswers: { skill_method: '用自己的筆記練習' },
+  startDate: '2026-08-11',
+  preferredTimeSlot: 'evening',
+};
+
 test('Initial Coaching request 只傳必要資料並要求完整八週 schema', () => {
   const request = buildGeminiRequest({
     kind: 'initial-coaching-plan',
@@ -32,9 +53,65 @@ test('Initial Coaching request 只傳必要資料並要求完整八週 schema', 
 
   assert.match(prompt, /initial-coaching-onboarding\/v1/);
   assert.doesNotMatch(prompt, /private@example.com|account-secret|base64-secret/);
-  assert.equal(request.generationConfig.responseFormat.text.mimeType, 'application/json');
-  assert.equal(request.generationConfig.responseFormat.text.schema.properties.weeks.minItems, 8);
-  assert.equal(request.generationConfig.responseFormat.text.schema.properties.weeks.maxItems, 8);
+  assert.equal(request.generationConfig.responseMimeType, 'application/json');
+  assert.equal(request.generationConfig.responseSchema.properties.weeks.type, 'array');
+});
+
+test('Personal Growth request 只傳必要資料並要求可驗證的週任務 schema', () => {
+  const request = buildGeminiRequest({ kind: 'personal-growth-plan', submission: growthSubmission, email: 'private@example.com', accountId: 'secret' });
+  const prompt = request.contents[0].parts[0].text;
+  assert.match(prompt, /personal-growth-onboarding\/v1/);
+  assert.doesNotMatch(prompt, /private@example.com|secret/);
+  assert.match(prompt, /"secondary":\s*\[\]/);
+  assert.doesNotMatch(prompt, /focus_time/);
+  assert.match(prompt, /"skill_category":"coding"/);
+  assert.match(prompt, /"startDate":"2026-08-11"/);
+  assert.equal(request.generationConfig.responseMimeType, 'application/json');
+  assert.equal(request.generationConfig.responseSchema.properties.weeks.type, 'array');
+});
+
+test('Gemini generation config uses the REST structured-output fields', () => {
+  const request = buildGeminiRequest({ kind: 'personal-growth-plan', submission: growthSubmission });
+  assert.equal(request.generationConfig.responseMimeType, 'application/json');
+  assert.equal(request.generationConfig.responseSchema.type, 'object');
+  assert.equal('additionalProperties' in request.generationConfig.responseSchema, false);
+  assert.equal('minItems' in request.generationConfig.responseSchema.properties.weeks, false);
+  assert.equal('maxItems' in request.generationConfig.responseSchema.properties.weeks, false);
+  assert.equal('responseFormat' in request.generationConfig, false);
+});
+
+function completeGrowthPlan() {
+  return {
+    title: '四週小工具起步',
+    summary: '用四週完成第一個可展示的小作品。',
+    goalSummary: '完成一個可以展示的小工具',
+    feasibility: { status: 'REALISTIC', message: '每週三次、每次約三十分鐘。' },
+    coachingSummary: '先小步練習，再完成作品。',
+    reasoningSummary: '安排在可用日子，保留每週時間上限。',
+    milestones: [{ weekNumber: 1, title: '開始', purpose: '了解基礎', successSignal: '完成第一項練習' }, { weekNumber: 4, title: '輸出', purpose: '完成作品', successSignal: '有可展示成果' }],
+    weeks: Array.from({ length: 4 }, (_, index) => ({
+      weekNumber: index + 1,
+      focus: '完成本週一個小步驟',
+      tasks: [2, 4, 6].map((weekday) => ({
+        weekday,
+        startTime: '19:00',
+        title: '短時間練習',
+        totalMinutes: 30,
+        instructions: ['準備今天的小主題', '專注練習一個步驟', '記下完成內容和下一步'],
+        completionCriteria: '留下練習紀錄',
+        easierFallback: '只做第一步十分鐘',
+        coachingReason: '小步驟有助維持節奏',
+      })),
+    })),
+  };
+}
+
+test('Personal Growth response 會由 server 固定為 Draft 並保留週任務', async () => {
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(completeGrowthPlan()) }] } }] }) });
+  const result = await generateWithGemini({ kind: 'personal-growth-plan', submission: growthSubmission }, { apiKey: 'test-key', fetchImpl });
+  assert.equal(result.weeks.length, 4);
+  assert.deepEqual(result.weeks.map((week) => week.status), Array(4).fill('DRAFT'));
+  assert.equal(result.weeks[0].tasks[0].status, 'DRAFT');
 });
 
 function completeInitialPlan(weekday = 1) {
@@ -99,7 +176,7 @@ test('計畫調整 request 只提供受控 feedback，並要求重新輸出完�
   assert.match(prompt, /START_EASIER/);
   assert.match(prompt, /第一週看起來有點多/);
   assert.doesNotMatch(prompt, /do-not-send@example.com/);
-  assert.equal(request.generationConfig.responseFormat.text.schema.properties.weeks.minItems, 8);
+  assert.equal(request.generationConfig.responseSchema.properties.weeks.type, 'array');
 });
 
 test('backend 會拒絕初學者連續跑步日，但容許在非可跑日標示 Rest', async () => {
@@ -123,7 +200,7 @@ test('backend 會拒絕初學者連續跑步日，但容許在非可跑日標示
 
 test('計畫請求只使用 structured JSON output', () => {
   const request = buildGeminiRequest({ kind: 'running-plan', assessment });
-  assert.equal(request.generationConfig.responseFormat.text.mimeType, 'application/json');
+  assert.equal(request.generationConfig.responseMimeType, 'application/json');
   assert.match(request.contents[0].parts[0].text, /availableDays/);
 });
 

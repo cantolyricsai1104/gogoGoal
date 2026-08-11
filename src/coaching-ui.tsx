@@ -54,7 +54,7 @@ const weeklyTimeChoices: Choice<WeeklyActivityTime>[] = [
   ['2_3_hours', '2–3 小時'], ['3_plus_hours', '3 小時以上'], ['unknown', '不確定'],
 ];
 const activityChoices: Choice<ActivityType>[] = [
-  ['walking', '步行'], ['strength', '健身／重量訓練'], ['ball_sports', '球類'],
+  ['running', '跑步'], ['walking', '步行'], ['strength', '健身／重量訓練'], ['ball_sports', '球類'],
   ['swimming', '游泳'], ['cycling', '單車'], ['other', '其他'],
 ];
 const timeChoices: Choice<DailyTimeRange>[] = [
@@ -148,21 +148,27 @@ export function RunningOnboardingScreen({ draft, onChange, onBackRoot, onSubmit 
   let content: React.ReactNode;
   if (step === 0) {
     const primary = submission.goal.primaryReason;
+    const selectedReasons = [primary, ...submission.goal.secondaryReasons];
+    const toggleGoalReason = (reason: GoalReason) => {
+      const nextReasons = selectedReasons.includes(reason)
+        ? selectedReasons.filter((item) => item !== reason)
+        : [...selectedReasons, reason];
+      const [nextPrimary, ...nextSecondary] = nextReasons;
+      if (!nextPrimary) return;
+      updateGoal({
+        ...submission.goal,
+        primaryReason: nextPrimary,
+        secondaryReasons: nextSecondary,
+      });
+    };
     content = <>
       <StepHeader step={1} title="你的目標" intro="先選最主要的原因，再補充其他重要動機。Coach 會知道哪個結果應該優先。" />
-      <Text style={styles.sectionTitle}>你最主要為甚麼想開始跑步？</Text>
-      <ChoiceGroup choices={goalReasons} selected={primary} onSelect={(reason) => updateGoal({
-        ...submission.goal,
-        primaryReason: reason,
-        secondaryReasons: submission.goal.secondaryReasons.filter((item) => item !== reason),
-      })} />
+      <Text style={styles.sectionTitle}>你最主要為甚麼想開始跑步？ <Text style={styles.helper}>（可單選或多選）</Text></Text>
+      <ChoiceGroup multi choices={goalReasons} selected={selectedReasons} onSelect={toggleGoalReason} />
       {primary === 'other' && <LabeledInput label="你的主要原因" value={submission.goal.otherReason ?? ''} onChangeText={(otherReason) => updateGoal({ ...submission.goal, otherReason })} placeholder="例如：陪伴家人建立運動習慣" />}
       {primary === 'race' && <><Text style={styles.sectionTitle}>你的比賽距離</Text><ChoiceGroup choices={([['5k', '5K'], ['10k', '10K'], ['half_marathon', '半馬'], ['marathon', '全馬']] as Choice<RaceDistance>[])} selected={submission.goal.raceDistance ?? '5k'} onSelect={(raceDistance) => updateGoal({ ...submission.goal, raceDistance })} /><LabeledInput label="比賽或目標日期" value={submission.goal.targetDate ?? ''} onChangeText={(targetDate) => updateGoal({ ...submission.goal, targetDate })} placeholder="YYYY-MM-DD" /></>}
       {primary === 'fat_loss' && <LabeledInput label="期望改變多少 kg" value={submission.goal.targetWeightChangeKg ? String(submission.goal.targetWeightChangeKg) : ''} onChangeText={(value) => updateGoal({ ...submission.goal, targetWeightChangeKg: Number(value) || undefined })} numeric optional />}
       {primary !== 'race' && <LabeledInput label="具體目標或目標日期" value={submission.goal.specificTarget ?? ''} onChangeText={(specificTarget) => updateGoal({ ...submission.goal, specificTarget })} placeholder="例如：連續跑 5 km；或每星期跑 3 次" multiline optional />}
-      <Text style={styles.sectionTitle}>還有哪些原因對你重要？</Text>
-      <Text style={styles.helper}>可多選，亦可以不選。</Text>
-      <ChoiceGroup multi choices={goalReasons.filter(([reason]) => reason !== primary)} selected={submission.goal.secondaryReasons} onSelect={(reason) => updateGoal({ ...submission.goal, secondaryReasons: submission.goal.secondaryReasons.includes(reason) ? submission.goal.secondaryReasons.filter((item) => item !== reason) : [...submission.goal.secondaryReasons, reason] })} />
       <LabeledInput label="如果三個月後順利，你希望自己變成怎樣？" value={submission.goal.desiredIdentityInThreeMonths ?? ''} onChangeText={(desiredIdentityInThreeMonths) => updateGoal({ ...submission.goal, desiredIdentityInThreeMonths })} multiline optional />
       <View style={styles.contextCard}><LabeledInput label="你現在的情況是怎樣？" value={submission.goal.currentSituation ?? ''} onChangeText={(currentSituation) => updateGoal({ ...submission.goal, currentSituation })} placeholder="例如：工作時間不固定、很久沒有運動" multiline optional /><Text style={styles.helper}>不知道怎樣寫也沒問題，我們會根據之後的實際跑步慢慢了解你。</Text></View>
     </>;

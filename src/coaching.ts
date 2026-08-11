@@ -1,5 +1,6 @@
 import {
   DailyTimeRange,
+  defaultGoalClassification,
   GoalReason,
   OnboardingSubmission,
   PlanPhase,
@@ -183,7 +184,14 @@ function buildPhases(): PlanPhase[] {
 }
 
 export function sanitiseCoachingSubmission(submission: OnboardingSubmission): OnboardingSubmission {
-  return JSON.parse(JSON.stringify(submission)) as OnboardingSubmission;
+  const clean = JSON.parse(JSON.stringify(submission)) as OnboardingSubmission;
+  return {
+    ...clean,
+    goal: {
+      ...clean.goal,
+      classification: clean.goal.classification ?? { ...defaultGoalClassification },
+    },
+  };
 }
 
 export function onboardingFromLegacyAssessment(assessment: RunningAssessment): OnboardingSubmission {
@@ -204,7 +212,7 @@ export function onboardingFromLegacyAssessment(assessment: RunningAssessment): O
             : '25_34';
   return {
     schemaVersion: 'initial-coaching-onboarding/v1',
-    goal: { primaryReason: 'health', secondaryReasons: [], specificTarget: assessment.desiredAbility },
+    goal: { classification: { ...defaultGoalClassification }, primaryReason: 'health', secondaryReasons: [], specificTarget: assessment.desiredAbility },
     ability: { ageRange, recentRunningFrequency: 'none', jogAbility: 'under_5', hadRunningHabit: false },
     recentActivity: { activeDays: 'unknown', weeklyTime: 'unknown', activityTypes: [] },
     availability: {
@@ -243,6 +251,7 @@ export class InitialCoachingWorkflow {
     return {
       id: `draft-${now.getTime()}`,
       schemaVersion: 'initial-coaching-plan/v1',
+      classification: cleanSubmission.goal.classification,
       planVersion: 1,
       status: 'DRAFT',
       createdAt: now.toISOString(),

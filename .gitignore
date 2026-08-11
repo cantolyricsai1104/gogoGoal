@@ -1,6 +1,7 @@
 node_modules/
 .expo/
 dist/
+work/
 *.log
 .DS_Store
 .env*

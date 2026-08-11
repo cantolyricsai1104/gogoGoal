@@ -4,7 +4,7 @@ import { generateWithGemini } from './gemini.mjs';
 
 const port = Number(process.env.GO_GOAL_AI_PORT) || 8787;
 const host = process.env.GO_GOAL_AI_HOST || '127.0.0.1';
-const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+const model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 const apiKey = process.env.GEMINI_API_KEY?.trim();
 const maxBodyBytes = 18 * 1024 * 1024;
 

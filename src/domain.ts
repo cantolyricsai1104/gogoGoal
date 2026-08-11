@@ -4,6 +4,125 @@ export type GoalStatus = 'active' | 'paused' | 'completed' | 'abandoned';
 export type RunStatus = 'planned' | 'in_progress' | 'completed' | 'absent' | 'skipped';
 export type RecoveryType = 'backfill' | 'skip' | 'reschedule';
 
+export type LifeWheelCategory = 'health' | 'wealth' | 'career' | 'relationships' | 'personal_growth' | 'leisure' | 'environment' | 'meaning';
+export type LifeWheelSubcategory = 'exercise' | 'growth';
+export type GoalActivity = 'running' | 'strength_training' | 'swimming' | 'cycling' | 'walking' | 'ball_sports' | 'other';
+export type GoalClassification = {
+  category: LifeWheelCategory;
+  subcategory: LifeWheelSubcategory;
+  activity: GoalActivity;
+};
+
+export type PersonalGrowthFocus = 'new_skill' | 'language_learning' | 'reading_knowledge' | 'mindset' | 'focus_time' | 'creative_expression' | 'self_reflection' | 'discipline_habits' | 'other';
+export type PersonalGrowthLevel = 'starting' | 'some_experience' | 'intermediate' | 'advanced' | 'unknown';
+export type PersonalGrowthFormat = 'reading' | 'video' | 'practice' | 'project' | 'mixed';
+export type PersonalGrowthCycleWeeks = 4 | 8 | 12;
+export type PersonalGrowthTaskStatus = 'DRAFT' | 'PLANNED' | 'COMPLETED' | 'SKIPPED';
+export type PersonalGrowthClassification = { category: 'personal_growth'; subcategory: 'growth' };
+export type PersonalGrowthTemplateAnswers = Record<string, string>;
+export type PersonalGrowthTimeSlot = 'morning' | 'afternoon' | 'evening';
+
+export type PersonalGrowthSubmission = {
+  schemaVersion: 'personal-growth-onboarding/v1';
+  classification: PersonalGrowthClassification;
+  focus: { primary: PersonalGrowthFocus; secondary: PersonalGrowthFocus[] };
+  otherFocus?: string;
+  outcome: string;
+  successDefinition: string;
+  currentLevel: PersonalGrowthLevel;
+  currentSituation?: string;
+  cycleWeeks: PersonalGrowthCycleWeeks;
+  targetDate?: string;
+  weeklyMinutes: number;
+  availableDays: Weekday[];
+  timeByDay: Partial<Record<Weekday, DailyTimeRange>>;
+  preferredFormats: PersonalGrowthFormat[];
+  preferredLanguage?: string;
+  constraints?: string;
+  obstacles?: string;
+  desiredIdentity?: string;
+  /** Structured answers from the selected direction template. */
+  templateAnswers: PersonalGrowthTemplateAnswers;
+  /** Free text is only kept when a template answer is 「其他」. */
+  templateOtherAnswers: PersonalGrowthTemplateAnswers;
+  /** Local plan start date, selected before generation (YYYY-MM-DD). */
+  startDate?: string;
+  preferredTimeSlot?: PersonalGrowthTimeSlot;
+};
+
+export type PersonalGrowthTask = {
+  id: string;
+  weekNumber: number;
+  weekday: Weekday;
+  /** Assigned locally from the selected start date; editable after generation. */
+  date?: string;
+  startTime?: string;
+  status: PersonalGrowthTaskStatus;
+  title: string;
+  totalMinutes: number;
+  instructions: string[];
+  completionCriteria: string;
+  easierFallback: string;
+  coachingReason: string;
+};
+
+export type PersonalGrowthWeek = {
+  id: string;
+  weekNumber: number;
+  status: PersonalGrowthTaskStatus;
+  focus: string;
+  estimatedTotalMinutes: number;
+  tasks: PersonalGrowthTask[];
+};
+
+export type PersonalGrowthMilestone = {
+  id: string;
+  weekNumber: number;
+  title: string;
+  purpose: string;
+  successSignal: string;
+};
+
+export type PersonalGrowthPlanDraft = {
+  id: string;
+  schemaVersion: 'personal-growth-plan/v1';
+  planVersion: number;
+  status: 'DRAFT';
+  createdAt: string;
+  source: PlanSource;
+  submission: PersonalGrowthSubmission;
+  classification: PersonalGrowthClassification;
+  title: string;
+  summary: string;
+  goalSummary: string;
+  feasibility: { status: 'REALISTIC' | 'ADJUSTED'; message: string };
+  coachingSummary: string;
+  reasoningSummary: string;
+  milestones: PersonalGrowthMilestone[];
+  weeks: PersonalGrowthWeek[];
+  cycleWeeks: PersonalGrowthCycleWeeks;
+  weeklyMinutes: number;
+};
+
+export type PersonalGrowthGoal = {
+  id: string;
+  title: string;
+  status: GoalStatus;
+  createdAt: string;
+  committedAt: string;
+  startDate: string;
+  endDate: string;
+  cycleWeeks: PersonalGrowthCycleWeeks;
+  classification: PersonalGrowthClassification;
+  plan: PersonalGrowthPlanDraft;
+};
+
+export const defaultGoalClassification: GoalClassification = {
+  category: 'health',
+  subcategory: 'exercise',
+  activity: 'running',
+};
+
 export type GoalReason = 'fat_loss' | 'health' | 'fitness' | 'stress_relief' | 'discipline' | 'race' | 'other';
 export type RaceDistance = '5k' | '10k' | 'half_marathon' | 'marathon';
 export type AdultAgeRange = 'under_18' | '18_24' | '25_34' | '35_44' | '45_54' | '55_64' | '65_plus';
@@ -11,7 +130,7 @@ export type RecentRunningFrequency = 'none' | 'occasional' | 'once_weekly' | 'tw
 export type JogAbility = 'walk_30' | 'under_5' | '5_10' | '10_20' | '20_30' | '30_plus' | 'unknown';
 export type ActivityDays = 0 | 1 | 2 | 3 | 4 | '5_plus' | 'unknown';
 export type WeeklyActivityTime = 'under_30' | '30_60' | '1_2_hours' | '2_3_hours' | '3_plus_hours' | 'unknown';
-export type ActivityType = 'walking' | 'strength' | 'ball_sports' | 'swimming' | 'cycling' | 'other';
+export type ActivityType = 'running' | 'walking' | 'strength' | 'ball_sports' | 'swimming' | 'cycling' | 'other';
 export type DailyTimeRange = '20_30' | '30_45' | '45_60' | '60_90' | '90_plus' | 'unknown';
 export type RealisticFrequency = 2 | 3 | 4 | 5 | 'coach';
 
@@ -23,6 +142,7 @@ export type RecentRun =
 export type OnboardingSubmission = {
   schemaVersion: 'initial-coaching-onboarding/v1';
   goal: {
+    classification?: GoalClassification;
     primaryReason: GoalReason;
     secondaryReasons: GoalReason[];
     otherReason?: string;
@@ -123,6 +243,7 @@ export type RunningAssessment = {
 export type RunningPlanDraft = {
   id: string;
   schemaVersion: 'initial-coaching-plan/v1';
+  classification?: GoalClassification;
   planVersion: number;
   status: 'DRAFT';
   createdAt: string;
@@ -212,6 +333,7 @@ export type RunningGoal = {
   events: GoalEvent[];
   pause?: { reason: string; resumeDate: string; pausedAt: string };
   archivedReason?: string;
+  classification?: GoalClassification;
 };
 
 export type Account = {
@@ -221,9 +343,18 @@ export type Account = {
   photoAnalysisConsent: boolean;
   notificationPermission: 'undetermined' | 'granted' | 'denied' | 'unavailable';
   onboardingDraft?: RunningOnboardingDraft;
+  personalGrowthOnboardingDraft?: PersonalGrowthOnboardingDraft;
   drafts: RunningPlanDraft[];
   goals: RunningGoal[];
+  personalGrowthDrafts?: PersonalGrowthPlanDraft[];
+  personalGrowthGoals?: PersonalGrowthGoal[];
   deletionRequestedAt?: string;
+};
+
+export type PersonalGrowthOnboardingDraft = {
+  currentStep: 0 | 1 | 2 | 3 | 4;
+  submission: PersonalGrowthSubmission;
+  updatedAt: string;
 };
 
 export type AppData = {
@@ -258,6 +389,7 @@ export const defaultAssessment: RunningAssessment = {
 export const defaultOnboardingSubmission: OnboardingSubmission = {
   schemaVersion: 'initial-coaching-onboarding/v1',
   goal: {
+    classification: defaultGoalClassification,
     primaryReason: 'health',
     secondaryReasons: [],
     desiredIdentityInThreeMonths: '',
@@ -286,4 +418,25 @@ export const defaultOnboardingSubmission: OnboardingSubmission = {
     hasRunningPain: false,
     hasMedicalRestriction: false,
   },
+};
+
+export const defaultPersonalGrowthSubmission: PersonalGrowthSubmission = {
+  schemaVersion: 'personal-growth-onboarding/v1',
+  classification: { category: 'personal_growth', subcategory: 'growth' },
+  focus: { primary: 'new_skill', secondary: [] },
+  outcome: '',
+  successDefinition: '',
+  currentLevel: 'starting',
+  cycleWeeks: 8,
+  weeklyMinutes: 120,
+  availableDays: [2, 4, 6],
+  timeByDay: { 2: '30_45', 4: '30_45', 6: '45_60' },
+  preferredFormats: ['mixed'],
+  preferredLanguage: '繁體中文',
+  constraints: '',
+  obstacles: '',
+  desiredIdentity: '',
+  templateAnswers: {},
+  templateOtherAnswers: {},
+  preferredTimeSlot: 'evening',
 };

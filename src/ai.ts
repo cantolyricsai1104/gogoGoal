@@ -1,7 +1,8 @@
 import { File } from 'expo-file-system';
 
-import { CheckInPhoto, OnboardingSubmission, PlanPhase, PlanWeek, RunningAssessment, RunningPlanDraft, Weekday } from './domain';
+import { CheckInPhoto, OnboardingSubmission, PersonalGrowthPlanDraft, PersonalGrowthSubmission, PlanPhase, PlanWeek, RunningAssessment, RunningPlanDraft, Weekday } from './domain';
 import { InitialCoachingWorkflow, PlanFeedback } from './coaching';
+import { RemotePersonalGrowthPlan, mergeRemotePersonalGrowthPlan } from './personal-growth';
 
 type RemotePlan = Pick<RunningPlanDraft, 'title' | 'summary' | 'weekdays' | 'minutesPerRun' | 'cycleWeeks' | 'targetRate'>;
 type EncouragementResult = { text: string; analysis: CheckInPhoto['analysis'] };
@@ -17,7 +18,6 @@ type RemoteInitialPlan = {
   phases: PlanPhase[];
   weeks: PlanWeek[];
 };
-
 const fallbackMessages = [
   '你已經出發了，今天的承諾正在成形。',
   '很好，保持舒服節奏，把今天完成。',
@@ -97,6 +97,32 @@ export async function generateInitialPlanWithGemini(submission: OnboardingSubmis
     return mergeInitialPlan(remote, fallback, fallback.planVersion) ?? fallback;
   } catch {
     return fallback;
+  }
+}
+
+export async function generatePersonalGrowthPlanWithGemini(submission: PersonalGrowthSubmission, fallback: PersonalGrowthPlanDraft): Promise<PersonalGrowthPlanDraft> {
+  const remote = await post<RemotePersonalGrowthPlan>({ kind: 'personal-growth-plan', submission });
+  const plan = mergeRemotePersonalGrowthPlan(remote, fallback, fallback.planVersion);
+  if (!plan) throw new Error('Gemini returned an incomplete personal growth plan');
+  return plan;
+}
+
+export async function requestPersonalGrowthPlanRevision(
+  draft: PersonalGrowthPlanDraft,
+  feedback: 'START_EASIER' | 'MORE_CHALLENGE' | 'ADJUST_DAY',
+  reason: string,
+): Promise<PersonalGrowthPlanDraft | null> {
+  try {
+    const remote = await post<RemotePersonalGrowthPlan>({
+      kind: 'personal-growth-revision',
+      submission: draft.submission,
+      currentPlan: draft,
+      feedback,
+      reason: reason.trim(),
+    });
+    return mergeRemotePersonalGrowthPlan(remote, draft, draft.planVersion + 1);
+  } catch {
+    return null;
   }
 }
 

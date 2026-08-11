@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
-import { encouragePhoto, generateInitialPlanWithGemini, requestInitialPlanRevision } from './src/ai';
+import { encouragePhoto, generateInitialPlanWithGemini, generatePersonalGrowthPlanWithGemini, requestInitialPlanRevision } from './src/ai';
 import {
   Account,
   AppData,
@@ -29,29 +29,44 @@ import {
   RunningGoal,
   RunningOnboardingDraft,
   RunningPlanDraft,
+  PersonalGrowthFocus,
+  PersonalGrowthGoal,
+  PersonalGrowthOnboardingDraft,
+  PersonalGrowthPlanDraft,
+  defaultPersonalGrowthSubmission,
   Weekday,
   weekdayNames,
 } from './src/domain';
 import { InitialCoachingWorkflow, PlanFeedback } from './src/coaching';
 import { InitialPlanReviewScreen, PendingPlanRevision, RunningOnboardingScreen } from './src/coaching-ui';
+import { classificationLabels, lifeWheelCategories } from './src/life-wheel';
 import { cleanupExpiredPhotos, deleteAllAccountPhotos, deleteStoredPhoto, pickAndStorePhoto } from './src/media';
 import { cancelRunningReminders, requestNotificationPermission, scheduleRunningReminders } from './src/notifications';
 import { emptyAppData, loadAppData, loginLocally, replaceAccount, saveAppData } from './src/storage';
 import { addDays, dateKeyInZone, isValidTimezone, minutesUntilSecondPhoto } from './src/time';
 import { RunningCommitmentWorkflow } from './src/workflow';
+import { PersonalGrowthWorkflow, personalGrowthFocusOptions } from './src/personal-growth';
+import { PersonalGrowthCategoryScreen, PersonalGrowthGoalScreen, PersonalGrowthOnboardingScreen, PersonalGrowthPlanReviewScreen } from './src/personal-growth-ui';
 
-type Screen = 'workspace' | 'keep-fit' | 'assessment' | 'draft' | 'goal' | 'calendar' | 'archive' | 'settings' | 'revise';
+type Screen = 'workspace' | 'health' | 'keep-fit' | 'personal-growth' | 'growth-assessment' | 'growth-draft' | 'growth-goal' | 'assessment' | 'draft' | 'goal' | 'calendar' | 'archive' | 'settings' | 'revise';
 type Notice = { title: string; message: string } | null;
 
 const workflow = new RunningCommitmentWorkflow();
 const coachingWorkflow = new InitialCoachingWorkflow();
+const personalGrowthWorkflow = new PersonalGrowthWorkflow();
 const allDays: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
 const statusLabel: Record<RunningGoal['status'], string> = { active: '進行中', paused: '已暫停', completed: '已完成', abandoned: '已放棄' };
 const runStatusLabel: Record<RunRecord['status'], string> = { planned: '待完成', in_progress: '已開始', completed: '已完成', absent: '缺席', skipped: '已跳過' };
 
 const localTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Hong_Kong';
 const formatDate = (value: string) => new Intl.DateTimeFormat('zh-Hant-HK', { month: 'short', day: 'numeric', weekday: 'short', timeZone: 'UTC' }).format(new Date(`${value}T12:00:00.000Z`));
-const currentVersion = (goal: RunningGoal) => goal.planVersions[goal.planVersions.length - 1];
+const currentVersion = (goal: RunningGoal) => {
+  const version = goal.planVersions[goal.planVersions.length - 1];
+  const classification = goal.classification ?? { category: 'health' as const, subcategory: 'exercise' as const, activity: 'running' as const };
+  const categoryLabel = lifeWheelCategories.find(([category]) => category === classification.category)?.[1] ?? '健康（身心）';
+  const suffix = `${categoryLabel} ／ 運動 ／ ${classificationLabels[classification.activity]}`;
+  return version.summary.includes(suffix) ? version : { ...version, summary: `${version.summary} · ${suffix}` };
+};
 
 export default function App() {
   return <SafeAreaProvider><AppContent /></SafeAreaProvider>;
@@ -62,7 +77,9 @@ function AppContent() {
   const [ready, setReady] = useState(false);
   const [screen, setScreen] = useState<Screen>('workspace');
   const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
+  const [selectedGrowthGoalId, setSelectedGrowthGoalId] = useState<string | null>(null);
   const [draftId, setDraftId] = useState<string | null>(null);
+  const [growthDraftId, setGrowthDraftId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [pendingRevision, setPendingRevision] = useState<PendingPlanRevision | null>(null);
@@ -70,6 +87,8 @@ function AppContent() {
   const account = useMemo(() => data.accounts.find((item) => item.id === data.sessionAccountId) ?? null, [data]);
   const selectedGoal = account?.goals.find((goal) => goal.id === selectedGoalId) ?? account?.goals.find((goal) => goal.status === 'active' || goal.status === 'paused') ?? null;
   const draft = account?.drafts.find((item) => item.id === draftId) ?? (screen === 'draft' ? account?.drafts[0] ?? null : null);
+  const growthGoal = account?.personalGrowthGoals?.find((goal) => goal.id === selectedGrowthGoalId) ?? account?.personalGrowthGoals?.find((goal) => goal.status === 'active' || goal.status === 'paused') ?? null;
+  const growthDraft = account?.personalGrowthDrafts?.find((item) => item.id === growthDraftId) ?? (screen === 'growth-draft' ? account?.personalGrowthDrafts?.[0] ?? null : null);
 
   useEffect(() => {
     loadAppData()
@@ -122,6 +141,84 @@ function AppContent() {
   const saveOnboardingDraft = (next: RunningOnboardingDraft) => {
     if (!account) return;
     updateAccount({ ...account, onboardingDraft: next });
+  };
+
+  const savePersonalGrowthOnboardingDraft = (next: PersonalGrowthOnboardingDraft) => {
+    if (!account) return;
+    updateAccount({ ...account, personalGrowthOnboardingDraft: next });
+  };
+
+  const startPersonalGrowth = (focus: PersonalGrowthFocus) => {
+    if (!account) return;
+    const submission = { ...defaultPersonalGrowthSubmission, focus: { primary: focus, secondary: [] }, startDate: dateKeyInZone(new Date(), account.timezone) };
+    updateAccount({ ...account, personalGrowthOnboardingDraft: { currentStep: 0, submission, updatedAt: new Date().toISOString() } });
+    setScreen('growth-assessment');
+  };
+
+  const savePersonalGrowthDraft = async (submission: PersonalGrowthOnboardingDraft['submission']) => {
+    if (!account) return;
+    setBusy('Coach 正在整理你的個人成長計畫…');
+    const base = personalGrowthWorkflow.createFallbackPlan(submission, new Date());
+    try {
+      const nextDraft = await generatePersonalGrowthPlanWithGemini(submission, base);
+      updateAccount(personalGrowthWorkflow.saveDraft(account, nextDraft));
+      setGrowthDraftId(nextDraft.id);
+      setScreen('growth-draft');
+    } catch {
+      showMessage('已保留你選擇的答案和排程。請確認 Gemini 後端可用後，按「生成我的計畫」重試。', '暫時未能生成計畫');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const savePersonalGrowthDraftEdits = (nextDraft: PersonalGrowthPlanDraft) => {
+    if (!account) return;
+    updateAccount({ ...account, personalGrowthDrafts: (account.personalGrowthDrafts ?? []).map((item) => item.id === nextDraft.id ? nextDraft : item) });
+  };
+
+  const savePersonalGrowthGoal = (nextGoal: PersonalGrowthGoal) => {
+    if (!account) return;
+    updateAccount({ ...account, personalGrowthGoals: (account.personalGrowthGoals ?? []).map((item) => item.id === nextGoal.id ? nextGoal : item) });
+  };
+
+  const commitPersonalGrowthDraft = () => {
+    if (!account || !growthDraft) return;
+    const result = personalGrowthWorkflow.commit(account, growthDraft, new Date());
+    if (!result.ok) return showMessage(result.message, '尚未確認計畫');
+    updateAccount(result.value);
+    const goal = result.value.personalGrowthGoals?.[0];
+    if (goal) setSelectedGrowthGoalId(goal.id);
+    setScreen('growth-goal');
+    showMessage(result.message, '個人成長目標已保存');
+  };
+
+  const archivePersonalGrowthGoal = () => {
+    if (!growthGoal) return;
+    savePersonalGrowthGoal({ ...growthGoal, status: 'abandoned' });
+    setScreen('workspace');
+  };
+
+  const completePersonalGrowthGoal = () => {
+    if (!growthGoal) return;
+    savePersonalGrowthGoal({ ...growthGoal, status: 'completed' });
+    setScreen('workspace');
+  };
+
+  const extendPersonalGrowthGoal = () => {
+    if (!growthGoal) return;
+    const nextEnd = addDays(growthGoal.endDate, 7);
+    savePersonalGrowthGoal({
+      ...growthGoal,
+      endDate: nextEnd,
+      plan: {
+        ...growthGoal.plan,
+        weeks: growthGoal.plan.weeks.map((week) => ({
+          ...week,
+          tasks: week.tasks.map((task) => task.status === 'PLANNED' && task.date ? { ...task, date: addDays(task.date, 7) } : task),
+        })),
+      },
+    });
+    showMessage('未完成任務已順延一週。', '計畫已延長');
   };
 
   const reviseInitialDraft = async (feedback: PlanFeedback, reason: string) => {
@@ -233,8 +330,19 @@ function AppContent() {
   }
 
   let content: React.ReactNode;
-  if (screen === 'keep-fit') {
-    content = <KeepFitScreen onBack={() => setScreen('workspace')} onRunning={() => {
+  if (screen === 'health') {
+    content = <HealthScreen onBack={() => setScreen('workspace')} onExercise={() => setScreen('keep-fit')} />;
+  } else if (screen === 'personal-growth') {
+    content = <PersonalGrowthCategoryScreen onBack={() => setScreen('workspace')} onStart={startPersonalGrowth} />;
+  } else if (screen === 'growth-assessment') {
+    const onboardingDraft: PersonalGrowthOnboardingDraft = account.personalGrowthOnboardingDraft ?? {
+      currentStep: 0,
+      submission: defaultPersonalGrowthSubmission,
+      updatedAt: new Date().toISOString(),
+    };
+    content = <PersonalGrowthOnboardingScreen draft={onboardingDraft} onChange={savePersonalGrowthOnboardingDraft} onBackRoot={() => setScreen('personal-growth')} onSubmit={savePersonalGrowthDraft} />;
+  } else if (screen === 'keep-fit') {
+    content = <KeepFitScreen onBack={() => setScreen('health')} onRunning={() => {
       const current = account.goals.find((goal) => goal.status === 'active' || goal.status === 'paused');
       if (current) openGoal(current);
       else if (account.drafts[0]) {
@@ -263,6 +371,18 @@ function AppContent() {
         setPendingRevision(null);
       }}
       onCommit={commitDraft}
+    />;
+  } else if (screen === 'growth-draft' && growthDraft) {
+    content = <PersonalGrowthPlanReviewScreen draft={growthDraft} onBack={() => setScreen('growth-assessment')} onChange={savePersonalGrowthDraftEdits} onCommit={commitPersonalGrowthDraft} />;
+  } else if (screen === 'growth-goal' && growthGoal) {
+    content = <PersonalGrowthGoalScreen
+      goal={growthGoal}
+      onBack={() => setScreen('workspace')}
+      onChange={savePersonalGrowthGoal}
+      onComplete={completePersonalGrowthGoal}
+      onExtend={extendPersonalGrowthGoal}
+      onArchive={archivePersonalGrowthGoal}
+      onDelete={() => Alert.alert('永久刪除此計畫？', '此操作無法復原。', [{ text: '取消', style: 'cancel' }, { text: '永久刪除', style: 'destructive', onPress: () => { if (!account || !growthGoal) return; updateAccount({ ...account, personalGrowthGoals: (account.personalGrowthGoals ?? []).filter((item) => item.id !== growthGoal.id) }); setScreen('workspace'); } }])}
     />;
   } else if (screen === 'goal' && selectedGoal) {
     content = <GoalScreen
@@ -308,7 +428,7 @@ function AppContent() {
       setScreen('workspace');
     }} showMessage={showMessage} />;
   } else {
-    content = <WorkspaceScreen account={account} onKeepFit={() => setScreen('keep-fit')} onOpen={openGoal} />;
+    content = <WorkspaceScreen account={account} onHealth={() => setScreen('health')} onPersonalGrowth={() => setScreen('personal-growth')} onOpenGrowth={(goal) => { setSelectedGrowthGoalId(goal.id); setScreen('growth-goal'); }} onOpen={openGoal} />;
   }
 
   const activeTab: Screen = screen === 'calendar' ? 'calendar' : screen === 'archive' ? 'archive' : screen === 'settings' ? 'settings' : 'workspace';
@@ -316,7 +436,7 @@ function AppContent() {
     <SafeAreaView style={styles.app}>
       <StatusBar style="dark" />
       <View style={styles.main}>{content}</View>
-      {!['assessment', 'draft', 'goal', 'revise', 'keep-fit'].includes(screen) && <BottomTabs active={activeTab} onSelect={setScreen} />}
+      {!['assessment', 'draft', 'goal', 'revise', 'health', 'keep-fit', 'personal-growth', 'growth-assessment', 'growth-draft', 'growth-goal'].includes(screen) && <BottomTabs active={activeTab} onSelect={setScreen} />}
       {busy && <BusyOverlay message={busy} />}
       {notice && <NoticeModal notice={notice} onClose={() => setNotice(null)} />}
     </SafeAreaView>
@@ -347,10 +467,17 @@ function LoginScreen({ data, onLogin, notice, dismissNotice }: { data: AppData; 
   );
 }
 
-function WorkspaceScreen({ account, onKeepFit, onOpen }: { account: Account; onKeepFit: () => void; onOpen: (goal: RunningGoal) => void }) {
+function WorkspaceScreen({ account, onHealth, onPersonalGrowth, onOpenGrowth, onOpen }: { account: Account; onHealth: () => void; onPersonalGrowth: () => void; onOpenGrowth: (goal: PersonalGrowthGoal) => void; onOpen: (goal: RunningGoal) => void }) {
+  const [growthFilter, setGrowthFilter] = useState<'ongoing' | 'completed' | 'archived'>('ongoing');
   const current = account.goals.find((goal) => goal.status === 'active' || goal.status === 'paused');
   const today = dateKeyInZone(new Date(), account.timezone);
   const todayRecord = current?.records.find((record) => record.date === today);
+  const filteredGrowth = (account.personalGrowthGoals ?? [])
+    .filter((goal) => growthFilter === 'ongoing' ? goal.status === 'active' || goal.status === 'paused' : growthFilter === 'completed' ? goal.status === 'completed' : goal.status === 'abandoned')
+    .sort((left, right) => {
+      const nextDate = (goal: PersonalGrowthGoal) => goal.plan.weeks.flatMap((week) => week.tasks).filter((task) => task.status === 'PLANNED' && task.date).map((task) => task.date as string).sort()[0] ?? '9999-12-31';
+      return nextDate(left).localeCompare(nextDate(right));
+    });
   return (
     <ScrollView contentContainerStyle={styles.screen}>
       <View style={styles.headerRow}><View><Text style={styles.kicker}>PRIVATE WORKSPACE</Text><Text style={styles.pageTitle}>今天，照承諾做。</Text></View><View style={styles.avatar}><Text style={styles.avatarText}>{account.email[0].toUpperCase()}</Text></View></View>
@@ -364,20 +491,41 @@ function WorkspaceScreen({ account, onKeepFit, onOpen }: { account: Account; onK
       ) : (
         <View style={styles.emptyHero}><Text style={styles.emptyEyebrow}>沒有進行中的承諾</Text><Text style={styles.emptyTitle}>先建立一個你願意留下紀錄的目標。</Text><Text style={styles.muted}>一旦承諾，目標不能直接刪除；只能完成、暫停或放棄並說明原因。</Text></View>
       )}
-      <Text style={styles.sectionTitle}>選擇目標類別</Text>
-      <Pressable onPress={onKeepFit} style={styles.categoryCard}>
-        <View style={styles.categoryIcon}><Text style={styles.categoryIconText}>↗</Text></View>
-        <View style={styles.flex}><Text style={styles.categoryTitle}>Keep Fit</Text><Text style={styles.categoryText}>先從 Running 建立可持續的運動節奏。</Text></View>
-        <Text style={styles.cardArrow}>›</Text>
-      </Pressable>
-      <View style={styles.comingRow}><SmallComing title="學習" /><SmallComing title="閱讀" /><SmallComing title="睡眠" /></View>
+      <View style={styles.growthHeader}><Text style={styles.sectionTitle}>個人成長計畫</Text><Pressable onPress={onPersonalGrowth}><Text style={styles.growthStart}>＋ 新增</Text></Pressable></View>
+      <View style={styles.growthFilters}>{([['ongoing', '進行中'], ['completed', '已完成'], ['archived', '已封存']] as const).map(([value, label]) => <Pressable key={value} onPress={() => setGrowthFilter(value)} style={[styles.growthFilter, growthFilter === value && styles.growthFilterOn]}><Text style={[styles.growthFilterText, growthFilter === value && styles.growthFilterTextOn]}>{label}</Text></Pressable>)}</View>
+      {filteredGrowth.length ? filteredGrowth.map((goal) => { const tasks = goal.plan.weeks.flatMap((week) => week.tasks); const next = tasks.filter((task) => task.status === 'PLANNED' && task.date).sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`))[0]; const completed = tasks.filter((task) => task.status === 'COMPLETED').length; const focus = personalGrowthFocusOptions.find(([value]) => value === goal.plan.submission.focus.primary)?.[1] ?? '個人成長'; return <Pressable key={goal.id} onPress={() => onOpenGrowth(goal)} style={styles.categoryCard}><View style={styles.categoryIcon}><Text style={styles.categoryIconText}>成</Text></View><View style={styles.flex}><Text style={styles.categoryTitle}>{goal.title}</Text><Text style={styles.categoryText}>{focus} · {next ? `${next.date} ${next.startTime} · ${next.title}` : '沒有待完成任務'}</Text><Text style={styles.helper}>完成率：{tasks.length ? Math.round(completed / tasks.length * 100) : 0}%</Text></View><Text style={styles.cardArrow}>›</Text></Pressable>; }) : <Text style={styles.helper}>這個篩選中暫時沒有計畫。</Text>}
+      <Text style={styles.sectionTitle}>生命之輪</Text>
+      <Text style={styles.pageIntro}>把生活不同面向放在一起，先從最想改善的一格開始。</Text>
+      {lifeWheelCategories.map(([category, title, description], index) => category === 'health' ? (
+        <Pressable key={category} onPress={onHealth} style={styles.categoryCard}>
+          <View style={styles.categoryIcon}><Text style={styles.categoryIconText}>{index + 1}</Text></View>
+          <View style={styles.flex}><Text style={styles.categoryTitle}>{title}</Text><Text style={styles.categoryText}>{description}</Text><Text style={styles.helper}>健康 → 運動 → 跑步可用</Text></View>
+          <Text style={styles.cardArrow}>›</Text>
+        </Pressable>
+      ) : category === 'personal_growth' ? (
+        <Pressable key={category} onPress={onPersonalGrowth} style={styles.categoryCard}>
+          <View style={styles.categoryIcon}><Text style={styles.categoryIconText}>{index + 1}</Text></View>
+          <View style={styles.flex}><Text style={styles.categoryTitle}>{title}</Text><Text style={styles.categoryText}>{description}</Text><Text style={styles.helper}>個人成長規劃 V1 可用</Text></View>
+          <Text style={styles.cardArrow}>›</Text>
+        </Pressable>
+      ) : (
+        <View key={category} style={styles.categoryCard}>
+          <View style={styles.categoryIcon}><Text style={styles.categoryIconText}>{index + 1}</Text></View>
+          <View style={styles.flex}><Text style={styles.categoryTitle}>{title}</Text><Text style={styles.categoryText}>{description}</Text></View>
+          <Text style={styles.comingTag}>即將推出</Text>
+        </View>
+      ))}
       <View style={styles.principleCard}><Text style={styles.principleTitle}>承諾規則</Text><Text style={styles.principleText}>不能直接刪除目標。每次修改、暫停或放棄都會留下原因，讓你看清真正的節奏。</Text></View>
     </ScrollView>
   );
 }
 
+function HealthScreen({ onBack, onExercise }: { onBack: () => void; onExercise: () => void }) {
+  return <ScreenShell title="健康（身心）" onBack={onBack}><Text style={styles.kicker}>生命之輪 ／ 健康</Text><Text style={styles.pageTitle}>先照顧身體，才有餘力完成其他目標。</Text><Text style={styles.pageIntro}>健康包含生理作息、運動、皮膚、睡眠與情緒心理。V1 先從運動開始。</Text><Pressable onPress={onExercise} style={styles.categoryCard}><View style={styles.categoryIcon}><Text style={styles.categoryIconText}>運</Text></View><View style={styles.flex}><Text style={styles.categoryTitle}>運動</Text><Text style={styles.categoryText}>用適合你的運動方式建立可持續的節奏。</Text></View><Text style={styles.cardArrow}>›</Text></Pressable><View style={styles.comingRow}><SmallComing title="睡眠" /><SmallComing title="作息" /><SmallComing title="情緒心理" /></View></ScreenShell>;
+}
+
 function KeepFitScreen({ onBack, onRunning }: { onBack: () => void; onRunning: () => void }) {
-  return <ScreenShell title="Keep Fit" onBack={onBack}><Text style={styles.pageTitle}>你想用哪種方式保持健康？</Text><Text style={styles.pageIntro}>每種運動需要不同的承諾與驗證方式。V1 先把 Running 做好。</Text><Pressable onPress={onRunning} style={styles.runningCard}><Text style={styles.runningNumber}>01</Text><View style={styles.flex}><Text style={styles.runningTitle}>Running</Text><Text style={styles.runningText}>跑步日內完成兩張相片打卡，至少相隔 15 分鐘。</Text></View><Text style={styles.runningArrow}>→</Text></Pressable><ComingSoonCard title="Strength Training" /><ComingSoonCard title="Swimming" /><ComingSoonCard title="Cycling" /></ScreenShell>;
+  return <ScreenShell title="運動" onBack={onBack}><Text style={styles.kicker}>生命之輪 ／ 健康 ／ 運動</Text><Text style={styles.pageTitle}>你想用哪種方式保持健康？</Text><Text style={styles.pageIntro}>每種運動需要不同的承諾與驗證方式。V1 先把 Running 做好。</Text><Pressable onPress={onRunning} style={styles.runningCard}><Text style={styles.runningNumber}>01</Text><View style={styles.flex}><Text style={styles.runningTitle}>Running</Text><Text style={styles.runningText}>跑步日內完成兩張相片打卡，至少相隔 15 分鐘。</Text></View><Text style={styles.runningArrow}>→</Text></Pressable><ComingSoonCard title="Strength Training" /><ComingSoonCard title="Swimming" /><ComingSoonCard title="Cycling" /></ScreenShell>;
 }
 
 function GoalScreen({ account, goal, onBack, onCheckIn, onDeletePhoto, onCalendar, onRevise, onPause, onResume, onAbandon, onComplete, onRecover }: {
@@ -497,6 +645,7 @@ const styles = StyleSheet.create({
   avatar: { width: 42, height: 42, borderRadius: 15, backgroundColor: colors.ink, alignItems: 'center', justifyContent: 'center' }, avatarText: { color: '#fff', fontWeight: '900' },
   commitmentHero: { backgroundColor: colors.ink, borderRadius: 26, padding: 20, gap: 10 }, heroArrow: { color: colors.orange, fontSize: 24, fontWeight: '800' }, commitmentTitle: { color: '#fff', fontSize: 25, lineHeight: 31, fontWeight: '900' }, commitmentMeta: { color: '#C8C7C1', lineHeight: 20 }, todayBar: { backgroundColor: '#30312D', borderRadius: 17, marginTop: 4, padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, todayLabel: { color: '#A8A8A2', fontSize: 11, fontWeight: '800' }, todayStatus: { color: '#fff', fontWeight: '800', fontSize: 16 }, todayCount: { color: colors.orange, fontWeight: '900', fontSize: 24 }, todayCountSmall: { color: '#B8B8B1', fontWeight: '600', fontSize: 12 },
   emptyHero: { backgroundColor: colors.white, borderRadius: 24, borderWidth: 1, borderColor: colors.line, padding: 20, gap: 9 }, emptyEyebrow: { color: colors.orange, fontSize: 12, fontWeight: '900' }, emptyTitle: { color: colors.ink, fontSize: 21, fontWeight: '900', lineHeight: 28 },
+  growthHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, growthStart: { color: colors.orange, fontWeight: '900', fontSize: 13 }, growthFilters: { flexDirection: 'row', gap: 7, flexWrap: 'wrap' }, growthFilter: { backgroundColor: '#EDEAE3', borderRadius: 12, paddingHorizontal: 11, paddingVertical: 8 }, growthFilterOn: { backgroundColor: colors.ink }, growthFilterText: { color: colors.muted, fontWeight: '800', fontSize: 12 }, growthFilterTextOn: { color: '#fff' },
   categoryCard: { backgroundColor: colors.white, borderRadius: 22, borderWidth: 1, borderColor: colors.line, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 14 }, categoryIcon: { width: 48, height: 48, borderRadius: 16, backgroundColor: colors.orangePale, alignItems: 'center', justifyContent: 'center' }, categoryIconText: { color: colors.orange, fontSize: 24, fontWeight: '900' }, categoryTitle: { color: colors.ink, fontSize: 18, fontWeight: '900' }, categoryText: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 3 }, cardArrow: { color: colors.orange, fontWeight: '900', fontSize: 27 }, comingRow: { flexDirection: 'row', gap: 9 }, smallComing: { flex: 1, backgroundColor: '#EFECE5', borderRadius: 14, padding: 12 },
   smallComingTitle: { color: '#77776F', fontWeight: '800', fontSize: 13 }, smallComingText: { color: '#A09F98', fontSize: 10, marginTop: 4 }, principleCard: { borderLeftWidth: 3, borderLeftColor: colors.orange, paddingLeft: 15, paddingVertical: 5, marginTop: 4 }, principleTitle: { color: colors.ink, fontWeight: '900' }, principleText: { color: colors.muted, lineHeight: 21, marginTop: 5 },
   runningCard: { backgroundColor: colors.orange, borderRadius: 24, padding: 20, flexDirection: 'row', alignItems: 'center', gap: 15 }, runningNumber: { color: '#FFD8C6', fontSize: 13, fontWeight: '900' }, runningTitle: { color: '#fff', fontSize: 24, fontWeight: '900' }, runningText: { color: '#FFF0E8', lineHeight: 20, marginTop: 4 }, runningArrow: { color: '#fff', fontSize: 26, fontWeight: '900' }, comingCard: { padding: 18, borderRadius: 20, borderWidth: 1, borderColor: colors.line, backgroundColor: '#F0EEE8', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, comingTitle: { color: '#77776F', fontWeight: '800', fontSize: 16 }, comingTag: { color: '#A3A198', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
