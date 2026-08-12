@@ -69,8 +69,9 @@ const server = createServer(async (request, response) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown AI error';
     const clientError = /Invalid|Unsupported|Missing|too large/.test(message);
+    const upstreamBusy = /resource exhausted|429|503|unavailable|deadline exceeded|timeout/i.test(message);
     console.error(`[Gemini] ${message}`);
-    sendJson(response, clientError ? 400 : 502, { error: clientError ? message : 'Gemini request failed' });
+    sendJson(response, clientError ? 400 : upstreamBusy ? 503 : 502, { error: clientError || upstreamBusy ? message : 'Gemini request failed' });
   }
 });
 

@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
-import { encouragePhoto, generateInitialPlanWithGemini, generatePersonalGrowthPlanWithGemini, requestInitialPlanRevision } from './src/ai';
+import { encouragePhoto, generateInitialPlanWithGemini, generateNextPersonalGrowthWeekWithGemini, generatePersonalGrowthPlanWithGemini, requestInitialPlanRevision } from './src/ai';
 import {
   Account,
   AppData,
@@ -33,6 +33,7 @@ import {
   PersonalGrowthGoal,
   PersonalGrowthOnboardingDraft,
   PersonalGrowthPlanDraft,
+  PersonalGrowthWeeklyReview,
   defaultPersonalGrowthSubmission,
   Weekday,
   weekdayNames,
@@ -174,11 +175,12 @@ function AppContent() {
     const base = personalGrowthWorkflow.createFallbackPlan(submission, new Date());
     try {
       const generated = await generatePersonalGrowthPlanWithGemini(submission, base);
-      const nextDraft = generated.submission.focus.primary === submission.focus.primary
+      if (!(generated.submission.focus.primary === submission.focus.primary
         && generated.cycleWeeks === submission.cycleWeeks
         && generated.weeklyMinutes === submission.weeklyMinutes
-        ? generated
-        : base;
+        && generated.weeks.length === 1
+        && generated.weeks[0]?.weekNumber === 1)) throw new Error('Gemini returned an invalid Week 1 plan');
+      const nextDraft = generated;
       setData((current) => {
         const active = current.accounts.find((item) => item.id === current.sessionAccountId);
         if (!active) return current;
@@ -211,13 +213,38 @@ function AppContent() {
 
   const commitPersonalGrowthDraft = () => {
     if (!account || !growthDraft) return;
-    const result = personalGrowthWorkflow.commit(account, growthDraft, new Date());
+    const result = growthDraft.continuationGoalId
+      ? personalGrowthWorkflow.applyWeeklyDraft(account, growthDraft)
+      : personalGrowthWorkflow.commit(account, growthDraft, new Date());
     if (!result.ok) return showMessage(result.message, '尚未確認計畫');
     updateAccount(result.value);
-    const goal = result.value.personalGrowthGoals?.[0];
+    const goal = result.value.personalGrowthGoals?.find((item) => item.id === growthDraft.continuationGoalId) ?? result.value.personalGrowthGoals?.[0];
     if (goal) setSelectedGrowthGoalId(goal.id);
     setScreen('growth-goal');
     showMessage(result.message, '個人成長目標已保存');
+  };
+
+  const prepareNextPersonalGrowthWeek = async (review: PersonalGrowthWeeklyReview) => {
+    if (!account || !growthGoal) return;
+    setBusy(`Coach 正在根據你的回顧準備第 ${review.weekNumber + 1} 週…`);
+    try {
+      const base = personalGrowthWorkflow.createContinuationFallbackPlan(growthGoal, review, new Date());
+      const generated = await generateNextPersonalGrowthWeekWithGemini(growthGoal, review, base);
+      const expectedWeek = review.weekNumber + 1;
+      if (!(generated.continuationGoalId === growthGoal.id && generated.weeks.length === 1 && generated.weeks[0]?.weekNumber === expectedWeek && generated.weeklyReview?.weekNumber === review.weekNumber)) throw new Error('Gemini returned an invalid next-week plan');
+      setData((current) => {
+        const active = current.accounts.find((item) => item.id === current.sessionAccountId);
+        if (!active) return current;
+        return replaceAccount(current, personalGrowthWorkflow.saveDraft(active, generated));
+      });
+      setGrowthDraftId(generated.id);
+      setScreen('growth-draft');
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? `\n原因：${error.message}` : '';
+      showMessage(`本週進度尚未被覆蓋。請稍後再試，或保留目前計畫再回來。${detail}`, '暫時未能準備下一週');
+    } finally {
+      setBusy(null);
+    }
   };
 
   const archivePersonalGrowthGoal = () => {
@@ -238,8 +265,11 @@ function AppContent() {
     savePersonalGrowthGoal({
       ...growthGoal,
       endDate: nextEnd,
+      cycleWeeks: growthGoal.cycleWeeks + 1,
       plan: {
         ...growthGoal.plan,
+        cycleWeeks: growthGoal.cycleWeeks + 1,
+        submission: { ...growthGoal.plan.submission, cycleWeeks: growthGoal.cycleWeeks + 1 },
         weeks: growthGoal.plan.weeks.map((week) => ({
           ...week,
           tasks: week.tasks.map((task) => task.status === 'PLANNED' && task.date ? { ...task, date: addDays(task.date, 7) } : task),
@@ -401,12 +431,13 @@ function AppContent() {
       onCommit={commitDraft}
     />;
   } else if (screen === 'growth-draft' && growthDraft) {
-    content = <PersonalGrowthPlanReviewScreen draft={growthDraft} onBack={() => setScreen('growth-assessment')} onChange={savePersonalGrowthDraftEdits} onCommit={commitPersonalGrowthDraft} />;
+    content = <PersonalGrowthPlanReviewScreen draft={growthDraft} onBack={() => setScreen(growthDraft.continuationGoalId ? 'growth-goal' : 'growth-assessment')} onChange={savePersonalGrowthDraftEdits} onCommit={commitPersonalGrowthDraft} />;
   } else if (screen === 'growth-goal' && growthGoal) {
     content = <PersonalGrowthGoalScreen
       goal={growthGoal}
       onBack={() => setScreen('workspace')}
       onChange={savePersonalGrowthGoal}
+      onPrepareNextWeek={prepareNextPersonalGrowthWeek}
       onComplete={completePersonalGrowthGoal}
       onExtend={extendPersonalGrowthGoal}
       onArchive={archivePersonalGrowthGoal}

@@ -89,10 +89,12 @@ EXPO_PUBLIC_GO_GOAL_AI_URL=http://10.0.2.2:8787/go-go-goal
 
 其中 `10.0.2.2` 是 Android Emulator 存取開發電腦的特殊位址；iOS Simulator 改用 `127.0.0.1`。修改 `.env.local` 後必須重新啟動 Metro。
 
-後端接受四種 JSON 請求：
+後端接受六種 JSON 請求：
 
 - `kind: "initial-coaching-plan"`：接收最小必要 onboarding submission，回傳完整八週 structured plan。
 - `kind: "initial-coaching-revision"`：接收未承諾 Draft、受控 feedback 及選填原因，回傳完整的修訂草案；原草案在使用者確認前不會被替換。
+- `kind: "personal-growth-plan"`：接收個人成長 onboarding submission，只回傳**第 1 週**可執行的詳細計畫；不預先輸出後續週次。
+- `kind: "personal-growth-week-plan"`：接收已承諾的週次與使用者本週回顧（完成情況、實際分鐘、難度、障礙、證據、信心），只回傳調整後的下一週草案。
 - `kind: "running-plan"`：舊 contract compatibility；新 UI 不再使用。
 - `kind: "photo-encouragement"`：接收經使用者同意的 base64 相片及 MIME type，回傳 `{"text":"簡短鼓勵"}`。
 

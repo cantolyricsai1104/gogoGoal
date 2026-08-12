@@ -16,7 +16,8 @@ test('個人成長 fallback 會按方向、時間及週期產生可驗證草案'
   const workflow = new PersonalGrowthWorkflow();
   const draft = workflow.createFallbackPlan(validSubmission, new Date('2026-08-11T00:00:00.000Z'));
   assert.equal(draft.classification.category, 'personal_growth');
-  assert.equal(draft.weeks.length, 8);
+  assert.equal(draft.weeks.length, 1);
+  assert.equal(draft.weeks[0].weekNumber, 1);
   assert.equal(workflow.validatePlan(validSubmission, draft).ok, true);
   assert.ok(draft.weeks.every((week) => week.tasks.every((task) => task.instructions.length >= 3 && task.completionCriteria.length > 0)));
 });
@@ -58,6 +59,48 @@ test('確認個人成長草案後會保存 goal，且不需要日曆欄位', () 
     assert.equal(result.value.personalGrowthDrafts?.length, 0);
     assert.equal('calendar' in result.value.personalGrowthGoals?.[0], false);
   }
+});
+
+test('完成本週回顧後只會建立下一週草案，確認後才寫入目標歷史', () => {
+  const workflow = new PersonalGrowthWorkflow();
+  const now = new Date('2026-08-11T00:00:00.000Z');
+  const firstDraft = workflow.createFallbackPlan(validSubmission, now);
+  const account = {
+    id: 'adaptive-growth', email: 'adaptive@example.com', timezone: 'Asia/Hong_Kong',
+    photoAnalysisConsent: false, notificationPermission: 'denied' as const,
+    drafts: [], goals: [], personalGrowthDrafts: [firstDraft], personalGrowthGoals: [],
+  };
+  const committed = workflow.commit(account, firstDraft, now);
+  assert.equal(committed.ok, true);
+  if (!committed.ok) return;
+
+  const currentGoal = committed.value.personalGrowthGoals?.[0];
+  assert.ok(currentGoal);
+  if (!currentGoal) return;
+  const completedGoal = {
+    ...currentGoal,
+    plan: {
+      ...currentGoal.plan,
+      weeks: currentGoal.plan.weeks.map((week) => ({ ...week, tasks: week.tasks.map((task) => ({ ...task, status: 'COMPLETED' as const })) })),
+    },
+  };
+  const review = {
+    id: 'review-1', weekNumber: 1, createdAt: '2026-08-18T00:00:00.000Z', actualMinutes: 80,
+    difficulty: 'suitable' as const, obstacle: '工作臨時延長。', evidence: '完成練習紀錄與小作品草稿。', confidence: 4 as const,
+  };
+  const nextDraft = workflow.createContinuationFallbackPlan(completedGoal, review, new Date('2026-08-18T00:00:00.000Z'));
+  assert.equal(nextDraft.weeks.length, 1);
+  assert.equal(nextDraft.weeks[0].weekNumber, 2);
+  assert.equal(nextDraft.continuationGoalId, currentGoal.id);
+
+  const applied = workflow.applyWeeklyDraft({ ...committed.value, personalGrowthGoals: [completedGoal], personalGrowthDrafts: [nextDraft] }, nextDraft);
+  assert.equal(applied.ok, true);
+  if (!applied.ok) return;
+  const updated = applied.value.personalGrowthGoals?.[0];
+  assert.equal(updated?.plan.weeks.length, 2);
+  assert.deepEqual(updated?.plan.weeks.map((week) => week.status), ['COMPLETED', 'PLANNED']);
+  assert.equal(updated?.weeklyReviews.length, 1);
+  assert.equal(updated?.plan.goalSummary, currentGoal.plan.goalSummary);
 });
 
 test('舊帳戶沒有個人成長資料時會安全補上空陣列', () => {
@@ -130,7 +173,8 @@ test('個人成長排程支援其他週期、開始日及開始時間', () => {
   });
   const draft = workflow.createFallbackPlan(submission, new Date('2026-08-12T00:00:00.000Z'));
   assert.equal(draft.cycleWeeks, 16);
-  assert.equal(draft.weeks.length, 16);
+  assert.equal(draft.weeks.length, 1);
+  assert.equal(draft.weeks[0].weekNumber, 1);
   assert.equal(draft.weeks[0].tasks[0].startTime, '10:30');
   assert.equal(draft.submission.startDate, '2026-09-01');
 });

@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { Account, AppData, defaultGoalClassification, defaultOnboardingSubmission, GoalClassification, OnboardingSubmission, PersonalGrowthOnboardingDraft, PersonalGrowthPlanDraft, RunningPlanDraft } from './domain';
+import { Account, AppData, defaultGoalClassification, defaultOnboardingSubmission, GoalClassification, OnboardingSubmission, PersonalGrowthGoal, PersonalGrowthOnboardingDraft, PersonalGrowthPlanDraft, PersonalGrowthWeeklyReview, RunningPlanDraft } from './domain';
 import { isValidTimezone } from './time';
 import { normalisePersonalGrowthPlanDraft, normalisePersonalGrowthSubmission } from './personal-growth';
 
@@ -39,6 +39,40 @@ function normalisePersonalGrowthStep(value: unknown): PersonalGrowthOnboardingDr
   return 3;
 }
 
+function normaliseWeeklyReview(value: unknown): PersonalGrowthWeeklyReview | null {
+  if (!value || typeof value !== 'object') return null;
+  const review = value as Partial<PersonalGrowthWeeklyReview>;
+  const confidence = Math.min(5, Math.max(1, Number(review.confidence) || 3)) as PersonalGrowthWeeklyReview['confidence'];
+  const difficulty = ['easy', 'suitable', 'hard'].includes(String(review.difficulty)) ? review.difficulty as PersonalGrowthWeeklyReview['difficulty'] : 'suitable';
+  if (!Number.isInteger(Number(review.weekNumber)) || Number(review.weekNumber) < 1) return null;
+  return {
+    id: typeof review.id === 'string' ? review.id : `growth-review-${review.weekNumber}`,
+    weekNumber: Number(review.weekNumber),
+    createdAt: typeof review.createdAt === 'string' ? review.createdAt : new Date(0).toISOString(),
+    actualMinutes: Math.max(0, Math.min(600, Number(review.actualMinutes) || 0)),
+    difficulty,
+    obstacle: String(review.obstacle ?? '').slice(0, 500),
+    evidence: String(review.evidence ?? '').slice(0, 700),
+    confidence,
+    reflection: typeof review.reflection === 'string' ? review.reflection.slice(0, 700) : undefined,
+  };
+}
+
+function normalisePersonalGrowthGoal(goal: PersonalGrowthGoal): PersonalGrowthGoal {
+  const plan = normalisePersonalGrowthPlanDraft(goal.plan, goal.startDate);
+  const reviews = Array.isArray(goal.weeklyReviews) ? goal.weeklyReviews.map(normaliseWeeklyReview).filter((review): review is PersonalGrowthWeeklyReview => Boolean(review)) : [];
+  // Older versions generated every future week at once. Keep only completed history
+  // plus the first still-active week so the new adaptive cycle can take over safely.
+  const firstActiveIndex = plan.weeks.findIndex((week) => week.status === 'PLANNED' || week.tasks.some((task) => task.status === 'PLANNED'));
+  const adaptiveWeeks = reviews.length || firstActiveIndex < 0 ? plan.weeks : plan.weeks.slice(0, firstActiveIndex + 1);
+  return {
+    ...goal,
+    classification: { category: 'personal_growth', subcategory: 'growth' },
+    plan: { ...plan, weeks: adaptiveWeeks, classification: { category: 'personal_growth', subcategory: 'growth' } },
+    weeklyReviews: reviews,
+  };
+}
+
 export function normaliseAccount(account: Account): Account {
   return {
     ...account,
@@ -54,11 +88,12 @@ export function normaliseAccount(account: Account): Account {
     personalGrowthDrafts: Array.isArray(account.personalGrowthDrafts)
       ? account.personalGrowthDrafts.filter((draft): draft is PersonalGrowthPlanDraft => draft?.schemaVersion === 'personal-growth-plan/v1' && Array.isArray(draft.weeks)).map((draft) => ({
           ...normalisePersonalGrowthPlanDraft(draft, String(draft.createdAt ?? '').slice(0, 10) || '2026-01-01'),
+          weeks: draft.weeks.slice(0, 1),
           classification: { category: 'personal_growth', subcategory: 'growth' },
         }))
       : [],
     personalGrowthGoals: Array.isArray(account.personalGrowthGoals)
-      ? account.personalGrowthGoals.map((goal) => ({ ...goal, classification: { category: 'personal_growth' as const, subcategory: 'growth' as const }, plan: { ...normalisePersonalGrowthPlanDraft(goal.plan, goal.startDate), classification: { category: 'personal_growth' as const, subcategory: 'growth' as const } } }))
+      ? account.personalGrowthGoals.map((goal) => normalisePersonalGrowthGoal(goal))
       : [],
     personalGrowthOnboardingDraft: account.personalGrowthOnboardingDraft ? {
       ...account.personalGrowthOnboardingDraft,

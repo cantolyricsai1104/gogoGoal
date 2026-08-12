@@ -18,6 +18,7 @@ export type PersonalGrowthLevel = 'starting' | 'some_experience' | 'intermediate
 export type PersonalGrowthFormat = 'reading' | 'video' | 'practice' | 'project' | 'mixed';
 export type PersonalGrowthCycleWeeks = number;
 export type PersonalGrowthTaskStatus = 'DRAFT' | 'PLANNED' | 'COMPLETED' | 'SKIPPED';
+export type PersonalGrowthDifficulty = 'easy' | 'suitable' | 'hard';
 export type PersonalGrowthClassification = { category: 'personal_growth'; subcategory: 'growth' };
 export type PersonalGrowthTemplateAnswer = string | string[];
 export type PersonalGrowthTemplateAnswers = Record<string, PersonalGrowthTemplateAnswer>;
@@ -107,6 +108,22 @@ export type PersonalGrowthPlanDraft = {
   weeks: PersonalGrowthWeek[];
   cycleWeeks: PersonalGrowthCycleWeeks;
   weeklyMinutes: number;
+  /** Set only when this draft proposes the next week for an existing goal. */
+  continuationGoalId?: string;
+  /** The review that will be saved only after the proposed next week is confirmed. */
+  weeklyReview?: PersonalGrowthWeeklyReview;
+};
+
+export type PersonalGrowthWeeklyReview = {
+  id: string;
+  weekNumber: number;
+  createdAt: string;
+  actualMinutes: number;
+  difficulty: PersonalGrowthDifficulty;
+  obstacle: string;
+  evidence: string;
+  confidence: 1 | 2 | 3 | 4 | 5;
+  reflection?: string;
 };
 
 export type PersonalGrowthGoal = {
@@ -120,6 +137,7 @@ export type PersonalGrowthGoal = {
   cycleWeeks: PersonalGrowthCycleWeeks;
   classification: PersonalGrowthClassification;
   plan: PersonalGrowthPlanDraft;
+  weeklyReviews: PersonalGrowthWeeklyReview[];
 };
 
 export const defaultGoalClassification: GoalClassification = {

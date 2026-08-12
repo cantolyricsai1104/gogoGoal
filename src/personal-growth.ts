@@ -13,6 +13,7 @@ import {
   PersonalGrowthTemplateOtherAnswers,
   PersonalGrowthTimeSlot,
   PersonalGrowthWeek,
+  PersonalGrowthWeeklyReview,
   Weekday,
   defaultPersonalGrowthSubmission,
 } from './domain';
@@ -243,30 +244,27 @@ function taskCopy(submission: PersonalGrowthSubmission, weekNumber: number, inde
   };
 }
 
-function buildWeeks(submission: PersonalGrowthSubmission, startDate: string): PersonalGrowthWeek[] {
+function buildWeek(submission: PersonalGrowthSubmission, startDate: string, weekNumber: number): PersonalGrowthWeek {
   const days = chooseDays(submission);
   const minutes = Math.max(10, Math.floor(submission.weeklyMinutes / days.length));
-  return Array.from({ length: submission.cycleWeeks }, (_, index) => {
-    const weekNumber = index + 1;
-    const tasks = days.map((weekday, taskIndex) => ({
-      id: ids(`week-${weekNumber}-task`, taskIndex + 1),
-      weekNumber,
-      weekday,
-      date: dateForTask(startDate, weekNumber, weekday),
-      startTime: startTimeForSubmission(submission),
-      status: 'DRAFT' as const,
-      totalMinutes: Math.min(minutes, dailyMinutesForSubmission(submission, weekday)),
-      ...taskCopy(submission, weekNumber, taskIndex),
-    }));
-    return {
-      id: ids('week', weekNumber),
-      weekNumber,
-      status: 'DRAFT' as const,
-      focus: weekNumber <= Math.ceil(submission.cycleWeeks / 3) ? '先建立理解和開始的節奏' : weekNumber <= Math.ceil(submission.cycleWeeks * 2 / 3) ? '把練習變成可重複的節奏' : '完成一個小輸出並回顧下一步',
-      estimatedTotalMinutes: tasks.reduce((total, task) => total + task.totalMinutes, 0),
-      tasks,
-    };
-  });
+  const tasks = days.map((weekday, taskIndex) => ({
+    id: ids(`week-${weekNumber}-task`, taskIndex + 1),
+    weekNumber,
+    weekday,
+    date: dateForTask(startDate, weekNumber, weekday),
+    startTime: startTimeForSubmission(submission),
+    status: 'DRAFT' as const,
+    totalMinutes: Math.min(minutes, dailyMinutesForSubmission(submission, weekday)),
+    ...taskCopy(submission, weekNumber, taskIndex),
+  }));
+  return {
+    id: ids('week', weekNumber),
+    weekNumber,
+    status: 'DRAFT' as const,
+    focus: weekNumber === 1 ? '建立可持續的起點並留下第一份成果' : '根據上一週的真實進度，完成下一個可驗證步驟',
+    estimatedTotalMinutes: tasks.reduce((total, task) => total + task.totalMinutes, 0),
+    tasks,
+  };
 }
 
 /** Adds editable local date/time values to V1 plans that were created before scheduling existed. */
@@ -292,8 +290,7 @@ export class PersonalGrowthWorkflow {
     const normalised = preparePersonalGrowthSubmission(submission);
     const startDate = normalised.startDate ?? dateKeyInZone(now, 'Asia/Hong_Kong');
     const clean = { ...normalised, startDate };
-    const weeks = buildWeeks(clean, startDate);
-    const milestoneWeeks = [...new Set([1, Math.ceil(clean.cycleWeeks / 2), clean.cycleWeeks])];
+    const week = buildWeek(clean, startDate, 1);
     return {
       id: ids('growth-draft', now.getTime()),
       schemaVersion: 'personal-growth-plan/v1',
@@ -304,19 +301,13 @@ export class PersonalGrowthWorkflow {
       submission: clean,
       classification: clean.classification,
       title: `你的${focusLabel(clean.focus.primary)}起始計畫`,
-      summary: `用 ${clean.cycleWeeks} 週、每週約 ${clean.weeklyMinutes} 分鐘，把「${focusLabel(clean.focus.primary)}」拆成可以開始和完成的小行動。`,
+      summary: `以 ${clean.cycleWeeks} 週目標作為方向，先完成第 1 週小行動，再按真實進度規劃下一週。`,
       goalSummary: clean.outcome.trim() || `建立${focusLabel(clean.focus.primary)}的穩定節奏`,
       feasibility: { status: 'REALISTIC', message: '這份起始計畫先按你提供的時間容量安排，之後可以再按實際生活調整。' },
-      coachingSummary: '先完成小步驟，再逐步增加深度；完成紀錄比一次做得很久更重要。',
-      reasoningSummary: `從你選擇的 ${chooseDays(clean).length} 個日子安排固定節奏，每次只聚焦一個可見的小成果。`,
-      milestones: milestoneWeeks.map((weekNumber, index) => ({
-        id: ids('milestone', weekNumber),
-        weekNumber,
-        title: index === 0 ? '開始並留下第一筆紀錄' : index === milestoneWeeks.length - 1 ? '完成一個小輸出' : '維持每週節奏',
-        purpose: index === 0 ? '降低開始門檻，知道下一步是甚麼。' : index === milestoneWeeks.length - 1 ? '把學到的內容轉成自己的成果。' : '在不過度加量下建立重複。',
-        successSignal: index === 0 ? '完成至少一項小任務並寫下回顧。' : index === milestoneWeeks.length - 1 ? '有一個可以展示或回看的小成果。' : '大部分安排的任務都有留下紀錄。',
-      })),
-      weeks,
+      coachingSummary: '先完成本週的小步驟並留下證據；下週會根據你的回顧調整，不必現在承諾所有未來工作。',
+      reasoningSummary: `從你選擇的 ${chooseDays(clean).length} 個日子安排第一週，保留緩衝，讓實際完成情況決定下一週。`,
+      milestones: [{ id: ids('milestone', 1), weekNumber: 1, title: '本週的可見起點', purpose: '先建立可持續的節奏。', successSignal: '完成至少一項任務並保留成果或回顧。' }],
+      weeks: [week],
       cycleWeeks: clean.cycleWeeks,
       weeklyMinutes: clean.weeklyMinutes,
     };
@@ -341,9 +332,10 @@ export class PersonalGrowthWorkflow {
     const errors = [...this.validateSubmission(submission).errors];
     if (plan.schemaVersion !== 'personal-growth-plan/v1') errors.push('個人成長計畫 schema 不正確。');
     if (plan.status !== 'DRAFT') errors.push('確認前計畫必須保持草案狀態。');
-    if (plan.weeks.length !== plan.cycleWeeks) errors.push('計畫週數不正確。');
+    if (plan.weeks.length !== 1) errors.push('個人成長草案一次只能安排一週。');
     const clean = normalisePersonalGrowthSubmission(submission);
     plan.weeks.forEach((week) => {
+      if (!Number.isInteger(week.weekNumber) || week.weekNumber < 1 || week.weekNumber > plan.cycleWeeks) errors.push('本週編號不在計畫週期內。');
       const total = week.tasks.reduce((sum, task) => sum + task.totalMinutes, 0);
       if (total > clean.weeklyMinutes) errors.push(`第 ${week.weekNumber} 週超過每週時間上限。`);
       week.tasks.forEach((task) => {
@@ -355,7 +347,11 @@ export class PersonalGrowthWorkflow {
   }
 
   saveDraft(account: Account, draft: PersonalGrowthPlanDraft): Account {
-    return { ...account, personalGrowthDrafts: [draft, ...(account.personalGrowthDrafts ?? []).filter((item) => item.id !== draft.id)], personalGrowthOnboardingDraft: undefined };
+    return {
+      ...account,
+      personalGrowthDrafts: [draft, ...(account.personalGrowthDrafts ?? []).filter((item) => item.id !== draft.id && (!draft.continuationGoalId || item.continuationGoalId !== draft.continuationGoalId))],
+      personalGrowthOnboardingDraft: draft.continuationGoalId ? account.personalGrowthOnboardingDraft : undefined,
+    };
   }
 
   commit(account: Account, draft: PersonalGrowthPlanDraft, now: Date): { ok: true; value: Account; message: string } | { ok: false; message: string } {
@@ -381,6 +377,7 @@ export class PersonalGrowthWorkflow {
       cycleWeeks: draft.cycleWeeks,
       classification: draft.classification,
       plan: { ...scheduledDraft, weeks: scheduledDraft.weeks.map((week) => ({ ...week, status: 'PLANNED', tasks: week.tasks.map((task) => ({ ...task, status: 'PLANNED' })) })) },
+      weeklyReviews: [],
     };
     return {
       ok: true,
@@ -388,9 +385,78 @@ export class PersonalGrowthWorkflow {
       message: '個人成長計畫已確認並保存。',
     };
   }
+
+  createContinuationFallbackPlan(goal: PersonalGrowthGoal, review: PersonalGrowthWeeklyReview, now: Date): PersonalGrowthPlanDraft {
+    const submission = normalisePersonalGrowthSubmission(goal.plan.submission);
+    const nextWeekNumber = goal.plan.weeks.length + 1;
+    if (nextWeekNumber > goal.cycleWeeks) throw new Error('這個個人成長計畫已到最後一週。');
+    const startDate = submission.startDate ?? goal.startDate;
+    const week = buildWeek({ ...submission, startDate }, startDate, nextWeekNumber);
+    return {
+      id: ids('growth-week-draft', now.getTime()),
+      schemaVersion: 'personal-growth-plan/v1',
+      planVersion: goal.plan.planVersion + 1,
+      status: 'DRAFT',
+      createdAt: now.toISOString(),
+      source: 'fallback',
+      submission: { ...submission, startDate },
+      classification: goal.classification,
+      title: goal.title,
+      summary: `第 ${nextWeekNumber} 週會根據你剛完成的回顧重新安排。`,
+      goalSummary: goal.plan.goalSummary,
+      feasibility: goal.plan.feasibility,
+      coachingSummary: '先看真實完成情況，再安排下一個可完成的步驟。',
+      reasoningSummary: '這是等待你確認的下一週草案；原本目標和期限不會自動改變。',
+      milestones: [{ id: ids('milestone', nextWeekNumber), weekNumber: nextWeekNumber, title: `第 ${nextWeekNumber} 週下一步`, purpose: '依照本週回顧調整。', successSignal: '完成本週可驗證的成果。' }],
+      weeks: [week],
+      cycleWeeks: goal.cycleWeeks,
+      weeklyMinutes: submission.weeklyMinutes,
+      continuationGoalId: goal.id,
+      weeklyReview: review,
+    };
+  }
+
+  applyWeeklyDraft(account: Account, draft: PersonalGrowthPlanDraft): { ok: true; value: Account; message: string } | { ok: false; message: string } {
+    const goalId = draft.continuationGoalId;
+    const goal = account.personalGrowthGoals?.find((item) => item.id === goalId);
+    const validation = this.validatePlan(draft.submission, draft);
+    if (!goalId || !goal) return { ok: false, message: '找不到要更新的個人成長目標。' };
+    if (goal.status !== 'active') return { ok: false, message: '只有進行中的個人成長目標可以建立下一週。' };
+    if (!validation.ok) return { ok: false, message: `下一週草案尚未通過檢查：${validation.errors[0]}` };
+    const expectedWeek = goal.plan.weeks.length + 1;
+    const nextWeek = draft.weeks[0];
+    if (nextWeek.weekNumber !== expectedWeek) return { ok: false, message: '下一週草案的週次不正確。' };
+    if (!draft.weeklyReview || draft.weeklyReview.weekNumber !== expectedWeek - 1) return { ok: false, message: '請先完成本週回顧。' };
+    const updatedGoal: PersonalGrowthGoal = {
+      ...goal,
+      plan: {
+        ...goal.plan,
+        planVersion: draft.planVersion,
+        title: draft.title,
+        summary: draft.summary,
+        coachingSummary: draft.coachingSummary,
+        reasoningSummary: draft.reasoningSummary,
+        weeks: [
+          ...goal.plan.weeks.map((week) => week.weekNumber === draft.weeklyReview?.weekNumber ? { ...week, status: 'COMPLETED' as const } : week),
+          { ...nextWeek, status: 'PLANNED', tasks: nextWeek.tasks.map((task) => ({ ...task, status: 'PLANNED' as const })) },
+        ],
+      },
+      weeklyReviews: [...goal.weeklyReviews, draft.weeklyReview],
+    };
+    return {
+      ok: true,
+      value: {
+        ...account,
+        personalGrowthGoals: (account.personalGrowthGoals ?? []).map((item) => item.id === goal.id ? updatedGoal : item),
+        personalGrowthDrafts: (account.personalGrowthDrafts ?? []).filter((item) => item.id !== draft.id),
+      },
+      message: `第 ${expectedWeek} 週已根據你的回顧加入計畫。`,
+    };
+  }
 }
 
 export type RemotePersonalGrowthPlan = Pick<PersonalGrowthPlanDraft, 'title' | 'summary' | 'goalSummary' | 'feasibility' | 'coachingSummary' | 'reasoningSummary' | 'milestones' | 'weeks'>;
+export type RemotePersonalGrowthWeeklyPlan = Pick<PersonalGrowthPlanDraft, 'title' | 'summary' | 'goalSummary' | 'feasibility' | 'coachingSummary' | 'reasoningSummary'> & { week: PersonalGrowthWeek };
 
 /** Pure client-side merge seam for Gemini responses. */
 export function mergeRemotePersonalGrowthPlan(remote: RemotePersonalGrowthPlan, fallback: PersonalGrowthPlanDraft, planVersion: number): PersonalGrowthPlanDraft | null {
@@ -408,6 +474,27 @@ export function mergeRemotePersonalGrowthPlan(remote: RemotePersonalGrowthPlan, 
     reasoningSummary: remote.reasoningSummary,
     milestones: remote.milestones,
     weeks: remote.weeks,
+  };
+  const scheduled = normalisePersonalGrowthPlanDraft(candidate, candidate.submission.startDate ?? candidate.createdAt.slice(0, 10));
+  return new PersonalGrowthWorkflow().validatePlan(scheduled.submission, scheduled).ok ? scheduled : null;
+}
+
+/** Merges the one-week contract used for both the initial and adaptive plans. */
+export function mergeRemotePersonalGrowthWeeklyPlan(remote: RemotePersonalGrowthWeeklyPlan, fallback: PersonalGrowthPlanDraft, planVersion: number): PersonalGrowthPlanDraft | null {
+  const candidate: PersonalGrowthPlanDraft = {
+    ...fallback,
+    id: fallback.id,
+    planVersion,
+    createdAt: new Date().toISOString(),
+    source: 'gemini',
+    title: remote.title,
+    summary: remote.summary,
+    goalSummary: remote.goalSummary,
+    feasibility: remote.feasibility,
+    coachingSummary: remote.coachingSummary,
+    reasoningSummary: remote.reasoningSummary,
+    milestones: [{ id: ids('milestone', remote.week.weekNumber), weekNumber: remote.week.weekNumber, title: `第 ${remote.week.weekNumber} 週重點`, purpose: remote.week.focus, successSignal: '完成本週任務並留下回顧。' }],
+    weeks: [remote.week],
   };
   const scheduled = normalisePersonalGrowthPlanDraft(candidate, candidate.submission.startDate ?? candidate.createdAt.slice(0, 10));
   return new PersonalGrowthWorkflow().validatePlan(scheduled.submission, scheduled).ok ? scheduled : null;

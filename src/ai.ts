@@ -1,8 +1,8 @@
 import { File } from 'expo-file-system';
 
-import { CheckInPhoto, OnboardingSubmission, PersonalGrowthPlanDraft, PersonalGrowthSubmission, PlanPhase, PlanWeek, RunningAssessment, RunningPlanDraft, Weekday } from './domain';
+import { CheckInPhoto, OnboardingSubmission, PersonalGrowthGoal, PersonalGrowthPlanDraft, PersonalGrowthSubmission, PersonalGrowthWeeklyReview, PlanPhase, PlanWeek, RunningAssessment, RunningPlanDraft, Weekday } from './domain';
 import { InitialCoachingWorkflow, PlanFeedback } from './coaching';
-import { RemotePersonalGrowthPlan, mergeRemotePersonalGrowthPlan } from './personal-growth';
+import { RemotePersonalGrowthPlan, RemotePersonalGrowthWeeklyPlan, mergeRemotePersonalGrowthPlan, mergeRemotePersonalGrowthWeeklyPlan } from './personal-growth';
 
 type RemotePlan = Pick<RunningPlanDraft, 'title' | 'summary' | 'weekdays' | 'minutesPerRun' | 'cycleWeeks' | 'targetRate'>;
 type EncouragementResult = { text: string; analysis: CheckInPhoto['analysis'] };
@@ -37,7 +37,7 @@ async function post<T>(body: object): Promise<T> {
   const url = backendUrl();
   if (!url) throw new Error('AI backend is not configured');
   const controller = new AbortController();
-  // A complete 12-week structured plan can take just over 100 seconds on Vertex AI.
+  // A detailed weekly plan can still need retries when Vertex's shared capacity is busy.
   // Keep this below common serverless request ceilings while allowing it to finish.
   const timeout = setTimeout(() => controller.abort(), 3 * 60_000);
   try {
@@ -47,7 +47,11 @@ async function post<T>(body: object): Promise<T> {
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`AI backend returned ${response.status}`);
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => null) as { error?: unknown } | null;
+      const message = typeof errorBody?.error === 'string' ? errorBody.error : `AI backend returned ${response.status}`;
+      throw new Error(message);
+    }
     return response.json() as Promise<T>;
   } finally {
     clearTimeout(timeout);
@@ -103,9 +107,32 @@ export async function generateInitialPlanWithGemini(submission: OnboardingSubmis
 }
 
 export async function generatePersonalGrowthPlanWithGemini(submission: PersonalGrowthSubmission, fallback: PersonalGrowthPlanDraft): Promise<PersonalGrowthPlanDraft> {
-  const remote = await post<RemotePersonalGrowthPlan>({ kind: 'personal-growth-plan', submission });
-  const plan = mergeRemotePersonalGrowthPlan(remote, fallback, fallback.planVersion);
+  const remote = await post<RemotePersonalGrowthWeeklyPlan>({ kind: 'personal-growth-plan', submission });
+  const plan = mergeRemotePersonalGrowthWeeklyPlan(remote, fallback, fallback.planVersion);
   if (!plan) throw new Error('Gemini returned an incomplete personal growth plan');
+  return plan;
+}
+
+export async function generateNextPersonalGrowthWeekWithGemini(
+  goal: PersonalGrowthGoal,
+  review: PersonalGrowthWeeklyReview,
+  fallback: PersonalGrowthPlanDraft,
+): Promise<PersonalGrowthPlanDraft> {
+  const remote = await post<RemotePersonalGrowthWeeklyPlan>({
+    kind: 'personal-growth-week-plan',
+    submission: goal.plan.submission,
+    goal: {
+      title: goal.title,
+      goalSummary: goal.plan.goalSummary,
+      cycleWeeks: goal.cycleWeeks,
+      weeklyMinutes: goal.plan.weeklyMinutes,
+      weeks: goal.plan.weeks,
+      weeklyReviews: goal.weeklyReviews,
+    },
+    review,
+  });
+  const plan = mergeRemotePersonalGrowthWeeklyPlan(remote, fallback, fallback.planVersion);
+  if (!plan) throw new Error('Gemini returned an incomplete next-week plan');
   return plan;
 }
 

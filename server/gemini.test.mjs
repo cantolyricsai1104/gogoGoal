@@ -25,7 +25,7 @@ const growthSubmission = {
   classification: { category: 'personal_growth', subcategory: 'growth' },
   focus: { primary: 'new_skill', secondary: ['focus_time'] }, // legacy input: server must omit it from Gemini context
   outcome: '完成一個可以展示的小工具',
-  successDefinition: '有一個可以運作並能向朋友展示的作品',
+  successDefinition: '完成一個可展示的小工具',
   currentLevel: 'starting',
   cycleWeeks: 4,
   weeklyMinutes: 90,
@@ -66,8 +66,17 @@ test('Personal Growth request 只傳必要資料並要求可驗證的週任務 s
   assert.doesNotMatch(prompt, /focus_time/);
   assert.match(prompt, /"skill_category":"coding"/);
   assert.match(prompt, /"startDate":"2026-08-11"/);
+  assert.match(prompt, /NON-NEGOTIABLE PROJECT OUTCOME ANCHOR/);
+  const instruction = request.system_instruction.parts[0].text;
+  assert.match(instruction, /senior personal-growth learning designer/);
+  assert.match(instruction, /70 to 80% of weeklyMinutes/);
+  assert.match(instruction, /10 to 15 minute version/);
+  assert.match(instruction, /minimum vertical slice/);
+  assert.match(instruction, /Never write any URL, domain, hyperlink/);
+  assert.match(instruction, /precise search phrase/);
+  assert.match(instruction, /INTERNAL QUALITY GATE/);
   assert.equal(request.generationConfig.responseMimeType, 'application/json');
-  assert.equal(request.generationConfig.responseSchema.properties.weeks.type, 'array');
+  assert.equal(request.generationConfig.responseSchema.properties.week.type, 'object');
 });
 
 test('Gemini generation config uses the REST structured-output fields', () => {
@@ -75,14 +84,14 @@ test('Gemini generation config uses the REST structured-output fields', () => {
   assert.equal(request.generationConfig.responseMimeType, 'application/json');
   assert.equal(request.generationConfig.responseSchema.type, 'object');
   assert.equal('additionalProperties' in request.generationConfig.responseSchema, false);
-  assert.equal('minItems' in request.generationConfig.responseSchema.properties.weeks, false);
-  assert.equal('maxItems' in request.generationConfig.responseSchema.properties.weeks, false);
+  assert.equal('minItems' in request.generationConfig.responseSchema.properties.week, false);
+  assert.equal('maxItems' in request.generationConfig.responseSchema.properties.week, false);
   assert.equal('responseFormat' in request.generationConfig, false);
 });
 
-test('完整個人成長計畫保留足夠輸出預算，避免十二週 JSON 被截斷', () => {
+test('個人成長請求只為一週的詳細任務保留合適輸出預算', () => {
   const request = buildGeminiRequest({ kind: 'personal-growth-plan', submission: { ...growthSubmission, cycleWeeks: 8 } });
-  assert.equal(request.generationConfig.maxOutputTokens, 32768);
+  assert.equal(request.generationConfig.maxOutputTokens, 8192);
 });
 
 test('Vertex request preserves the structured-output contract without an API key', () => {
@@ -94,7 +103,31 @@ test('Vertex request preserves the structured-output contract without an API key
   assert.match(request.config.systemInstruction, /Traditional Chinese/);
 });
 
-function completeGrowthPlan() {
+test('下一週個人成長請求只帶回顧與已承諾週次，並要求下一個週次', () => {
+  const firstWeek = completeGrowthWeek().week;
+  const request = buildGeminiRequest({
+    kind: 'personal-growth-week-plan',
+    submission: growthSubmission,
+    goal: {
+      title: '四週小工具起步', goalSummary: '完成一個可展示的小工具', cycleWeeks: 4, weeklyMinutes: 90,
+      weeks: [{ ...firstWeek, status: 'COMPLETED' }], weeklyReviews: [],
+    },
+    review: {
+      weekNumber: 1, actualMinutes: 75, difficulty: 'suitable', obstacle: '工作較忙',
+      evidence: '完成練習紀錄', confidence: 4, reflection: '下週想維持節奏', privateNote: 'do-not-send',
+    },
+    email: 'private@example.com', accountId: 'secret',
+  });
+  const prompt = request.contents[0].parts[0].text;
+  assert.match(prompt, /Requested weekNumber: 2/);
+  assert.match(prompt, /NON-NEGOTIABLE PROJECT OUTCOME ANCHOR/);
+  assert.match(prompt, /工作較忙/);
+  assert.doesNotMatch(prompt, /private@example.com|secret|do-not-send/);
+  assert.equal(request.generationConfig.responseSchema.properties.week.type, 'object');
+  assert.equal(request.generationConfig.maxOutputTokens, 8192);
+});
+
+function completeGrowthWeek(weekNumber = 1) {
   return {
     title: '四週小工具起步',
     summary: '用四週完成第一個可展示的小作品。',
@@ -102,45 +135,121 @@ function completeGrowthPlan() {
     feasibility: { status: 'REALISTIC', message: '每週三次、每次約三十分鐘。' },
     coachingSummary: '先小步練習，再完成作品。',
     reasoningSummary: '安排在可用日子，保留每週時間上限。',
-    milestones: [{ weekNumber: 1, title: '開始', purpose: '了解基礎', successSignal: '完成第一項練習' }, { weekNumber: 4, title: '輸出', purpose: '完成作品', successSignal: '有可展示成果' }],
-    weeks: Array.from({ length: 4 }, (_, index) => ({
-      weekNumber: index + 1,
+    week: {
+      weekNumber,
       focus: '完成本週一個小步驟',
       tasks: [2, 4, 6].map((weekday) => ({
         weekday,
         startTime: '19:00',
-        title: '短時間練習',
+        title: '完成小工具的一段短時間練習',
         totalMinutes: 30,
         instructions: ['準備今天的小主題', '專注練習一個步驟', '記下完成內容和下一步'],
-        completionCriteria: '留下練習紀錄',
+        completionCriteria: '完成一個可展示的小工具，並留下練習紀錄',
         easierFallback: '只做第一步十分鐘',
         coachingReason: '小步驟有助維持節奏',
       })),
-    })),
+    },
   };
 }
 
-test('Personal Growth response 會由 server 固定為 Draft 並保留週任務', async () => {
-  const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(completeGrowthPlan()) }] } }] }) });
+test('Personal Growth response 會由 server 固定為 Draft 並只保留當週任務', async () => {
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(completeGrowthWeek()) }] } }] }) });
   const result = await generateWithGemini({ kind: 'personal-growth-plan', submission: growthSubmission }, { apiKey: 'test-key', fetchImpl });
-  assert.equal(result.weeks.length, 4);
-  assert.deepEqual(result.weeks.map((week) => week.status), Array(4).fill('DRAFT'));
-  assert.equal(result.weeks[0].tasks[0].status, 'DRAFT');
+  assert.equal(result.week.weekNumber, 1);
+  assert.equal(result.week.status, 'DRAFT');
+  assert.equal(result.week.tasks[0].status, 'DRAFT');
+});
+
+test('Vertex 遇到暫時性的 Resource exhausted 會退避後重試個人成長週計畫', async () => {
+  let calls = 0;
+  const vertexClient = {
+    models: {
+      generateContent: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('RESOURCE_EXHAUSTED (429)');
+        return { text: JSON.stringify(completeGrowthWeek()) };
+      },
+    },
+  };
+  const result = await generateWithGemini(
+    { kind: 'personal-growth-plan', submission: growthSubmission },
+    { provider: 'vertex', project: 'test-project', vertexClient, retryDelayMs: 0 },
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.week.weekNumber, 1);
+});
+
+test('Vertex 會要求模型修正少於三個任務的個人成長週計畫', async () => {
+  let calls = 0;
+  const incomplete = completeGrowthWeek();
+  incomplete.week.tasks.pop();
+  const vertexClient = {
+    models: {
+      generateContent: async () => {
+        calls += 1;
+        return { text: JSON.stringify(calls === 1 ? incomplete : completeGrowthWeek()) };
+      },
+    },
+  };
+  const result = await generateWithGemini(
+    { kind: 'personal-growth-plan', submission: growthSubmission },
+    { provider: 'vertex', project: 'test-project', vertexClient, retryDelayMs: 0 },
+  );
+  assert.equal(calls, 2);
+  assert.equal(result.week.tasks.length, 3);
 });
 
 test('Personal Growth keeps AI content while normalising an invalid AI schedule', async () => {
-  const generated = completeGrowthPlan();
+  const generated = completeGrowthWeek();
   generated.title = 'AI-specific interpersonal communication plan';
-  generated.weeks[0].tasks[0].weekday = 1;
-  generated.weeks[0].tasks[0].totalMinutes = 120;
+  generated.week.tasks[0].weekday = 1;
+  generated.week.tasks[0].totalMinutes = 120;
   const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(generated) }] } }] }) });
 
   const result = await generateWithGemini({ kind: 'personal-growth-plan', submission: growthSubmission }, { apiKey: 'test-key', fetchImpl });
 
   assert.equal(result.title, 'AI-specific interpersonal communication plan');
-  assert.ok(growthSubmission.availableDays.includes(result.weeks[0].tasks[0].weekday));
-  assert.ok(result.weeks[0].tasks[0].totalMinutes <= 45);
-  assert.ok(result.weeks[0].estimatedTotalMinutes <= growthSubmission.weeklyMinutes);
+  assert.ok(growthSubmission.availableDays.includes(result.week.tasks[0].weekday));
+  assert.ok(result.week.tasks[0].totalMinutes <= 45);
+  assert.ok(result.week.estimatedTotalMinutes <= growthSubmission.weeklyMinutes);
+});
+
+test('Personal Growth 拒絕少於三個任務的週計畫，避免泛用的未完成草案', async () => {
+  const generated = completeGrowthWeek();
+  generated.week.tasks.pop();
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(generated) }] } }] }) });
+  await assert.rejects(
+    generateWithGemini({ kind: 'personal-growth-plan', submission: { ...growthSubmission, outcome: 'expense tracker', successDefinition: 'record three expenses and show their total' } }, { apiKey: 'test-key', fetchImpl }),
+    /exactly three tasks/,
+  );
+});
+
+test('專案型個人成長拒絕沒有連結使用者成果的最終任務', async () => {
+  const generated = completeGrowthWeek();
+  generated.week.tasks[2] = {
+    ...generated.week.tasks[2],
+    title: '撰寫通用入門練習',
+    instructions: ['閱讀一段一般說明', '完成一個通用練習', '寫下心得'],
+    completionCriteria: '留下通用練習紀錄',
+  };
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(generated) }] } }] }) });
+  await assert.rejects(
+    generateWithGemini({ kind: 'personal-growth-plan', submission: { ...growthSubmission, outcome: 'expense tracker', successDefinition: 'record three expenses and show their total' } }, { apiKey: 'test-key', fetchImpl }),
+    /tied to the project outcome/,
+  );
+});
+
+test('專案型個人成長要求最終任務逐字包含使用者的成功定義', async () => {
+  const generated = completeGrowthWeek();
+  generated.week.tasks[2] = {
+    ...generated.week.tasks[2],
+    completionCriteria: '小工具已經完成並可展示。',
+  };
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(generated) }] } }] }) });
+  await assert.rejects(
+    generateWithGemini({ kind: 'personal-growth-plan', submission: growthSubmission }, { apiKey: 'test-key', fetchImpl }),
+    /must state the user success definition/,
+  );
 });
 
 function completeInitialPlan(weekday = 1) {
