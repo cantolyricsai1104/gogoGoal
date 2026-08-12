@@ -60,6 +60,25 @@ npm run android
 
 App 不會保存 Gemini API 金鑰。若沒有設定後端，計畫與鼓勵會使用可預測的安全 fallback，整個 V1 流程仍可操作。
 
+### Vertex AI（Google Cloud）模式
+
+若想以 Google Cloud 的 Vertex AI 呼叫模型而非 AI Studio API key，先在目標 project 啟用 **Vertex AI API**，並為本機使用者或 Cloud Run service account 授予 **Vertex AI User** 角色。本機開發安裝 Google Cloud CLI 後執行：
+
+```bash
+gcloud auth application-default login
+```
+
+然後在 `.env.local` 設定：
+
+```env
+GO_GOAL_AI_PROVIDER=vertex
+GOOGLE_CLOUD_PROJECT=your-google-cloud-project-id
+GOOGLE_CLOUD_LOCATION=global
+VERTEX_AI_MODEL=gemini-2.5-flash
+```
+
+Vertex 模式不讀取 `GEMINI_API_KEY`。正式部署到 Cloud Run 時，請使用 service account，不可倚賴開發機的登入憑證。
+
 本機 Android 模擬器設定：
 
 ```bash

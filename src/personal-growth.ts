@@ -8,7 +8,9 @@ import {
   PersonalGrowthPlanDraft,
   PersonalGrowthSubmission,
   PersonalGrowthTask,
+  PersonalGrowthTemplateAnswer,
   PersonalGrowthTemplateAnswers,
+  PersonalGrowthTemplateOtherAnswers,
   PersonalGrowthTimeSlot,
   PersonalGrowthWeek,
   Weekday,
@@ -109,24 +111,54 @@ export function templateForFocus(focus: PersonalGrowthFocus): PersonalGrowthTemp
   return focus === 'other' ? [] : personalGrowthTemplates[focus];
 }
 
-export function templateAnswerLabel(focus: PersonalGrowthFocus, key: string, answer: string, otherAnswers: PersonalGrowthTemplateAnswers = {}): string {
-  if (answer === 'other') return otherAnswers[key]?.trim() || '其他';
+export function templateAnswerLabel(focus: PersonalGrowthFocus, key: string, answer: PersonalGrowthTemplateAnswer, otherAnswers: PersonalGrowthTemplateOtherAnswers = {}): string {
   const question = templateForFocus(focus).find((item) => item.key === key);
-  return question?.options.find(([value]) => value === answer)?.[1] ?? answer;
+  const answers = Array.isArray(answer) ? answer : [answer];
+  return answers.filter(Boolean).map((value) => value === 'other' ? otherAnswers[key]?.trim() || '其他' : question?.options.find(([option]) => option === value)?.[1] ?? value).join('、');
 }
 
 export function hasCompleteTemplateAnswers(submission: PersonalGrowthSubmission): boolean {
   return templateForFocus(submission.focus.primary).every((question) => {
     const answer = submission.templateAnswers?.[question.key];
-    return Boolean(answer) && (answer !== 'other' || Boolean(submission.templateOtherAnswers?.[question.key]?.trim()));
+    const values = Array.isArray(answer) ? answer : answer ? [answer] : [];
+    return values.length > 0 && (!values.includes('other') || Boolean(submission.templateOtherAnswers?.[question.key]?.trim()));
   });
 }
 
 const ids = (prefix: string, value: string | number) => `${prefix}-${value}`;
-const dailyLimit: Record<DailyTimeRange, number> = { '20_30': 30, '30_45': 45, '45_60': 60, '60_90': 90, '90_plus': 120, unknown: 30 };
-const timeSlotStart: Record<PersonalGrowthTimeSlot, string> = { morning: '08:00', afternoon: '13:00', evening: '19:00' };
+const dailyLimit: Record<Exclude<DailyTimeRange, 'other'>, number> = { '20_30': 30, '30_45': 45, '45_60': 60, '60_90': 90, '90_plus': 120, unknown: 30 };
+const timeSlotStart: Record<Exclude<PersonalGrowthTimeSlot, 'other'>, string> = { morning: '08:00', afternoon: '13:00', evening: '19:00' };
+
+function validClock(value: unknown): string | undefined {
+  const text = String(value ?? '').trim();
+  if (!/^\d{2}:\d{2}$/.test(text)) return undefined;
+  const [hours, minutes] = text.split(':').map(Number);
+  return hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59 ? text : undefined;
+}
+
+function startTimeForSubmission(submission: PersonalGrowthSubmission): string {
+  if (submission.preferredTimeSlot === 'other') return validClock(submission.preferredStartTime) ?? '19:00';
+  return timeSlotStart[submission.preferredTimeSlot ?? 'evening'] ?? '19:00';
+}
+
+function dailyMinutesForSubmission(submission: PersonalGrowthSubmission, weekday: Weekday): number {
+  const range = submission.timeByDay[weekday] ?? 'unknown';
+  if (range === 'other') return Math.max(1, Number(submission.timeByDayCustom?.[weekday]) || 30);
+  return dailyLimit[range];
+}
 
 function cleanAnswerMap(value: unknown): PersonalGrowthTemplateAnswers {
+  if (!value || typeof value !== 'object') return {};
+  const result: PersonalGrowthTemplateAnswers = {};
+  Object.entries(value as Record<string, unknown>).forEach(([key, answer]) => {
+    if (key.length > 80) return;
+    if (typeof answer === 'string') result[key] = answer.trim().slice(0, 160);
+    else if (Array.isArray(answer)) result[key] = answer.filter((item): item is string => typeof item === 'string').map((item) => item.trim().slice(0, 160)).filter(Boolean);
+  });
+  return result;
+}
+
+function cleanOtherAnswerMap(value: unknown): PersonalGrowthTemplateOtherAnswers {
   if (!value || typeof value !== 'object') return {};
   return Object.fromEntries(Object.entries(value as Record<string, unknown>)
     .filter(([key, answer]) => key.length <= 80 && typeof answer === 'string')
@@ -138,8 +170,10 @@ export function normalisePersonalGrowthSubmission(value: PersonalGrowthSubmissio
   const primary = source.focus?.primary ?? defaultPersonalGrowthSubmission.focus.primary;
   const availableDays = [...new Set((source.availableDays ?? []).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))] as Weekday[];
   const timeByDay = { ...(source.timeByDay ?? {}) };
+  const timeByDayCustom = { ...(source.timeByDayCustom ?? {}) };
   availableDays.forEach((day) => {
-    if (!timeByDay[day]) timeByDay[day] = '30_45';
+    if (!['20_30', '30_45', '45_60', '60_90', '90_plus', 'other', 'unknown'].includes(timeByDay[day] ?? '')) timeByDay[day] = '30_45';
+    if (timeByDay[day] === 'other') timeByDayCustom[day] = Math.max(1, Number(timeByDayCustom[day]) || 30);
   });
   return {
     ...defaultPersonalGrowthSubmission,
@@ -148,12 +182,15 @@ export function normalisePersonalGrowthSubmission(value: PersonalGrowthSubmissio
     focus: { primary, secondary: [] },
     availableDays,
     timeByDay,
+    timeByDayCustom,
     preferredFormats: source.preferredFormats?.length ? [...new Set(source.preferredFormats)] : ['mixed'],
+    cycleWeeks: Number.isInteger(Number(source.cycleWeeks)) && Number(source.cycleWeeks) > 0 ? Number(source.cycleWeeks) : defaultPersonalGrowthSubmission.cycleWeeks,
     weeklyMinutes: Math.min(600, Math.max(30, Number(source.weeklyMinutes) || defaultPersonalGrowthSubmission.weeklyMinutes)),
     templateAnswers: cleanAnswerMap(source.templateAnswers),
-    templateOtherAnswers: cleanAnswerMap(source.templateOtherAnswers),
+    templateOtherAnswers: cleanOtherAnswerMap(source.templateOtherAnswers),
     startDate: /^\d{4}-\d{2}-\d{2}$/.test(source.startDate ?? '') ? source.startDate : undefined,
-    preferredTimeSlot: ['morning', 'afternoon', 'evening'].includes(source.preferredTimeSlot ?? '') ? source.preferredTimeSlot as PersonalGrowthTimeSlot : 'evening',
+    preferredTimeSlot: ['morning', 'afternoon', 'evening', 'other'].includes(source.preferredTimeSlot ?? '') ? source.preferredTimeSlot as PersonalGrowthTimeSlot : 'evening',
+    preferredStartTime: validClock(source.preferredStartTime),
   };
 }
 
@@ -216,9 +253,9 @@ function buildWeeks(submission: PersonalGrowthSubmission, startDate: string): Pe
       weekNumber,
       weekday,
       date: dateForTask(startDate, weekNumber, weekday),
-      startTime: timeSlotStart[submission.preferredTimeSlot ?? 'evening'],
+      startTime: startTimeForSubmission(submission),
       status: 'DRAFT' as const,
-      totalMinutes: Math.min(minutes, dailyLimit[submission.timeByDay[weekday] ?? 'unknown']),
+      totalMinutes: Math.min(minutes, dailyMinutesForSubmission(submission, weekday)),
       ...taskCopy(submission, weekNumber, taskIndex),
     }));
     return {
@@ -244,7 +281,7 @@ export function normalisePersonalGrowthPlanDraft(plan: PersonalGrowthPlanDraft, 
       tasks: week.tasks.map((task) => ({
         ...task,
         date: task.date ?? dateForTask(startDate, week.weekNumber, task.weekday),
-        startTime: task.startTime ?? timeSlotStart[submission.preferredTimeSlot ?? 'evening'],
+        startTime: task.startTime ?? startTimeForSubmission(submission),
       })),
     })),
   };
@@ -310,7 +347,7 @@ export class PersonalGrowthWorkflow {
       const total = week.tasks.reduce((sum, task) => sum + task.totalMinutes, 0);
       if (total > clean.weeklyMinutes) errors.push(`第 ${week.weekNumber} 週超過每週時間上限。`);
       week.tasks.forEach((task) => {
-        if (task.totalMinutes <= 0 || task.totalMinutes > 180) errors.push(`第 ${week.weekNumber} 週有不符合時間範圍的任務。`);
+        if (task.totalMinutes <= 0) errors.push(`第 ${week.weekNumber} 週有不符合時間範圍的任務。`);
         if (!task.title.trim() || !task.date || !task.startTime) errors.push(`第 ${week.weekNumber} 週任務內容不完整。`);
       });
     });

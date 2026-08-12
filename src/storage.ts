@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { Account, AppData, defaultGoalClassification, defaultOnboardingSubmission, GoalClassification, OnboardingSubmission, PersonalGrowthPlanDraft, RunningPlanDraft } from './domain';
+import { Account, AppData, defaultGoalClassification, defaultOnboardingSubmission, GoalClassification, OnboardingSubmission, PersonalGrowthOnboardingDraft, PersonalGrowthPlanDraft, RunningPlanDraft } from './domain';
 import { isValidTimezone } from './time';
 import { normalisePersonalGrowthPlanDraft, normalisePersonalGrowthSubmission } from './personal-growth';
 
@@ -26,6 +26,19 @@ function normaliseSubmission(submission: OnboardingSubmission): OnboardingSubmis
   return { ...source, goal: { ...source.goal, classification: normaliseGoalClassification(source.goal?.classification) } };
 }
 
+/**
+ * The first Personal Growth direction screen was removed from the onboarding
+ * flow. Existing drafts still use the old five-step numbering, so map them to
+ * the equivalent step in the new four-step flow when they are loaded.
+ */
+function normalisePersonalGrowthStep(value: unknown): PersonalGrowthOnboardingDraft['currentStep'] {
+  const step = Number(value);
+  if (!Number.isInteger(step) || step <= 1) return 0;
+  if (step === 2) return 1;
+  if (step === 3) return 2;
+  return 3;
+}
+
 export function normaliseAccount(account: Account): Account {
   return {
     ...account,
@@ -47,7 +60,11 @@ export function normaliseAccount(account: Account): Account {
     personalGrowthGoals: Array.isArray(account.personalGrowthGoals)
       ? account.personalGrowthGoals.map((goal) => ({ ...goal, classification: { category: 'personal_growth' as const, subcategory: 'growth' as const }, plan: { ...normalisePersonalGrowthPlanDraft(goal.plan, goal.startDate), classification: { category: 'personal_growth' as const, subcategory: 'growth' as const } } }))
       : [],
-    personalGrowthOnboardingDraft: account.personalGrowthOnboardingDraft ? { ...account.personalGrowthOnboardingDraft, submission: normalisePersonalGrowthSubmission(account.personalGrowthOnboardingDraft.submission) } : undefined,
+    personalGrowthOnboardingDraft: account.personalGrowthOnboardingDraft ? {
+      ...account.personalGrowthOnboardingDraft,
+      currentStep: normalisePersonalGrowthStep(account.personalGrowthOnboardingDraft.currentStep),
+      submission: normalisePersonalGrowthSubmission(account.personalGrowthOnboardingDraft.submission),
+    } : undefined,
   };
 }
 

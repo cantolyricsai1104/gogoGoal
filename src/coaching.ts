@@ -35,7 +35,7 @@ export type PlanDifference = {
 };
 
 const allowedTypes = new Set<PlanSessionType>(['RUN_WALK', 'EASY_RUN', 'LONG_EASY_RUN', 'REST']);
-const timeLimit: Record<DailyTimeRange, number> = {
+const timeLimit: Record<Exclude<DailyTimeRange, 'other'>, number> = {
   '20_30': 30,
   '30_45': 45,
   '45_60': 60,
@@ -154,7 +154,8 @@ function sessionCopy(type: PlanSessionType, minutes: number, week: number): Pick
 }
 
 function buildSession(submission: OnboardingSubmission, weekday: Weekday, week: number, index: number, count: number): PlanSession {
-  const limit = timeLimit[submission.availability.timeByDay[weekday] ?? 'unknown'];
+  const range = submission.availability.timeByDay[weekday] ?? 'unknown';
+  const limit = timeLimit[range === 'other' ? 'unknown' : range];
   const progression = [0, 0, 5, 5, 10, 10, 15, 10][week - 1] ?? 0;
   const beginner = isBeginner(submission);
   const requestedType: PlanSessionType = index === count - 1 && count > 1
@@ -317,7 +318,8 @@ export class InitialCoachingWorkflow {
           if (!submission.availability.availableDays.includes(session.weekday)) errors.push(`第 ${week.weekNumber} 週安排在不可用日期。`);
           if (seen.has(session.weekday)) errors.push(`第 ${week.weekNumber} 週同一天有重複訓練。`);
           seen.add(session.weekday);
-          const limit = timeLimit[submission.availability.timeByDay[session.weekday] ?? 'unknown'];
+          const range = submission.availability.timeByDay[session.weekday] ?? 'unknown';
+          const limit = timeLimit[range === 'other' ? 'unknown' : range];
           if (session.totalMinutes > limit) errors.push(`第 ${week.weekNumber} 週課堂時間不符合限制。`);
         }
         if (session.instructions.length < 3 || !session.title.trim() || !session.talkTest.trim() || !session.easierFallback.trim() || !session.coachingReason.trim()) errors.push(`第 ${week.weekNumber} 週課堂說明不完整。`);

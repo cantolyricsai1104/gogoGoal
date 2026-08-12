@@ -148,24 +148,52 @@ function AppContent() {
     updateAccount({ ...account, personalGrowthOnboardingDraft: next });
   };
 
-  const startPersonalGrowth = (focus: PersonalGrowthFocus) => {
+  const startPersonalGrowth = (focus: PersonalGrowthFocus, otherFocus = '') => {
     if (!account) return;
-    const submission = { ...defaultPersonalGrowthSubmission, focus: { primary: focus, secondary: [] }, startDate: dateKeyInZone(new Date(), account.timezone) };
+    const existing = account.personalGrowthOnboardingDraft;
+    if (existing?.submission.focus.primary === focus && (existing.submission.otherFocus ?? '') === otherFocus.trim()) {
+      setScreen('growth-assessment');
+      return;
+    }
+    const submission = { ...defaultPersonalGrowthSubmission, focus: { primary: focus, secondary: [] }, otherFocus: otherFocus.trim() || undefined, startDate: dateKeyInZone(new Date(), account.timezone) };
     updateAccount({ ...account, personalGrowthOnboardingDraft: { currentStep: 0, submission, updatedAt: new Date().toISOString() } });
     setScreen('growth-assessment');
   };
 
   const savePersonalGrowthDraft = async (submission: PersonalGrowthOnboardingDraft['submission']) => {
     if (!account) return;
+    setData((current) => {
+      const active = current.accounts.find((item) => item.id === current.sessionAccountId);
+      if (!active) return current;
+      return replaceAccount(current, {
+        ...active,
+        personalGrowthOnboardingDraft: { currentStep: 3, submission, updatedAt: new Date().toISOString() },
+      });
+    });
     setBusy('Coach 正在整理你的個人成長計畫…');
     const base = personalGrowthWorkflow.createFallbackPlan(submission, new Date());
     try {
-      const nextDraft = await generatePersonalGrowthPlanWithGemini(submission, base);
-      updateAccount(personalGrowthWorkflow.saveDraft(account, nextDraft));
+      const generated = await generatePersonalGrowthPlanWithGemini(submission, base);
+      const nextDraft = generated.submission.focus.primary === submission.focus.primary
+        && generated.cycleWeeks === submission.cycleWeeks
+        && generated.weeklyMinutes === submission.weeklyMinutes
+        ? generated
+        : base;
+      setData((current) => {
+        const active = current.accounts.find((item) => item.id === current.sessionAccountId);
+        if (!active) return current;
+        const withDraft = personalGrowthWorkflow.saveDraft(active, nextDraft);
+        return replaceAccount(current, {
+          ...withDraft,
+          // Keep the submitted answers available for a safe retry or edit.
+          personalGrowthOnboardingDraft: { currentStep: 3, submission, updatedAt: new Date().toISOString() },
+        });
+      });
       setGrowthDraftId(nextDraft.id);
       setScreen('growth-draft');
-    } catch {
-      showMessage('已保留你選擇的答案和排程。請確認 Gemini 後端可用後，按「生成我的計畫」重試。', '暫時未能生成計畫');
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? `\n原因：${error.message}` : '';
+      showMessage(`已保留你選擇的答案和排程。請按「生成我的計畫」重試。${detail}`, '暫時未能生成計畫');
     } finally {
       setBusy(null);
     }

@@ -37,7 +37,9 @@ async function post<T>(body: object): Promise<T> {
   const url = backendUrl();
   if (!url) throw new Error('AI backend is not configured');
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
+  // A complete 12-week structured plan can take just over 100 seconds on Vertex AI.
+  // Keep this below common serverless request ceilings while allowing it to finish.
+  const timeout = setTimeout(() => controller.abort(), 3 * 60_000);
   try {
     const response = await fetch(url, {
       method: 'POST',

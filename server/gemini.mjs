@@ -1,3 +1,5 @@
+import { GoogleGenAI } from '@google/genai';
+
 const planSchema = {
   type: 'object',
   additionalProperties: false,
@@ -95,7 +97,7 @@ const personalGrowthTaskSchema = {
     weekday: { type: 'integer', minimum: 0, maximum: 6 },
     startTime: { type: 'string' },
     title: { type: 'string' },
-    totalMinutes: { type: 'integer', minimum: 10, maximum: 120 },
+    totalMinutes: { type: 'integer', minimum: 1, maximum: 600 },
     instructions: { type: 'array', minItems: 3, items: { type: 'string' } },
     completionCriteria: { type: 'string' },
     easierFallback: { type: 'string' },
@@ -126,19 +128,18 @@ const personalGrowthPlanSchema = {
       items: {
         type: 'object',
         additionalProperties: false,
-        properties: { weekNumber: { type: 'integer', minimum: 1, maximum: 12 }, title: { type: 'string' }, purpose: { type: 'string' }, successSignal: { type: 'string' } },
+        properties: { weekNumber: { type: 'integer', minimum: 1 }, title: { type: 'string' }, purpose: { type: 'string' }, successSignal: { type: 'string' } },
         required: ['weekNumber', 'title', 'purpose', 'successSignal'],
       },
     },
     weeks: {
       type: 'array',
-      minItems: 4,
-      maxItems: 12,
+      minItems: 1,
       items: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          weekNumber: { type: 'integer', minimum: 1, maximum: 12 },
+          weekNumber: { type: 'integer', minimum: 1 },
           focus: { type: 'string' },
           tasks: { type: 'array', minItems: 1, maxItems: 5, items: personalGrowthTaskSchema },
         },
@@ -192,9 +193,19 @@ function sanitizeSubmission(value) {
 
 function sanitizePersonalGrowthSubmission(value) {
   if (!value || typeof value !== 'object') throw new Error('Invalid personal growth submission');
-  const stringMap = (candidate) => !candidate || typeof candidate !== 'object' ? {} : Object.fromEntries(Object.entries(candidate)
-    .filter(([key, item]) => key.length <= 80 && typeof item === 'string')
-    .map(([key, item]) => [key, item.trim().slice(0, 160)]));
+  const answerMap = (candidate) => {
+    if (!candidate || typeof candidate !== 'object') return {};
+    const result = {};
+    Object.entries(candidate).forEach(([key, item]) => {
+      if (key.length > 80) return;
+      if (typeof item === 'string') result[key] = item.trim().slice(0, 160);
+      else if (Array.isArray(item)) result[key] = item.filter((value) => typeof value === 'string').map((value) => value.trim().slice(0, 160)).filter(Boolean);
+    });
+    return result;
+  };
+  const customTimeMap = value.timeByDayCustom && typeof value.timeByDayCustom === 'object'
+    ? Object.fromEntries(Object.entries(value.timeByDayCustom).filter(([key, item]) => ['0', '1', '2', '3', '4', '5', '6'].includes(key) && Number.isFinite(Number(item)) && Number(item) > 0).map(([key, item]) => [key, Number(item)]))
+    : {};
   return {
     schemaVersion: value.schemaVersion,
     classification: value.classification,
@@ -209,15 +220,17 @@ function sanitizePersonalGrowthSubmission(value) {
     weeklyMinutes: value.weeklyMinutes,
     availableDays: value.availableDays,
     timeByDay: value.timeByDay,
+    timeByDayCustom: customTimeMap,
     preferredFormats: value.preferredFormats,
     preferredLanguage: value.preferredLanguage,
     constraints: value.constraints,
     obstacles: value.obstacles,
     desiredIdentity: value.desiredIdentity,
-    templateAnswers: stringMap(value.templateAnswers),
-    templateOtherAnswers: stringMap(value.templateOtherAnswers),
+    templateAnswers: answerMap(value.templateAnswers),
+    templateOtherAnswers: answerMap(value.templateOtherAnswers),
     startDate: value.startDate,
     preferredTimeSlot: value.preferredTimeSlot,
+    preferredStartTime: value.preferredStartTime,
   };
 }
 
@@ -246,6 +259,12 @@ function sanitizePersonalGrowthPlanForRevision(value) {
 }
 
 const dailyTimeLimit = { '20_30': 30, '30_45': 45, '45_60': 60, '60_90': 90, '90_plus': 120, unknown: 30 };
+
+function dailyMinutes(submission, weekday) {
+  const range = submission.timeByDay?.[weekday] ?? 'unknown';
+  if (range === 'other') return Math.max(1, Number(submission.timeByDayCustom?.[weekday]) || 30);
+  return dailyTimeLimit[range] ?? 30;
+}
 const supportedSessionTypes = new Set(['RUN_WALK', 'EASY_RUN', 'LONG_EASY_RUN', 'REST']);
 
 function isBeginnerSubmission(submission) {
@@ -308,7 +327,7 @@ function cleanInitialPlan(value, submission) {
         if (!available.has(weekday)) throw new Error(`Invalid Initial Plan: week ${weekNumber} uses unavailable day`);
         if (seenTrainingDays.has(weekday)) throw new Error(`Invalid Initial Plan: duplicate weekday in week ${weekNumber}`);
         seenTrainingDays.add(weekday);
-        const limit = dailyTimeLimit[submission.availability?.timeByDay?.[weekday] ?? 'unknown'] ?? 30;
+        const limit = dailyMinutes({ timeByDay: submission.availability?.timeByDay, timeByDayCustom: submission.availability?.timeByDayCustom }, weekday);
         if (totalMinutes > limit) throw new Error(`Invalid Initial Plan: session exceeds time limit in week ${weekNumber}`);
       }
       if (!Array.isArray(session.instructions) || session.instructions.length < 3) throw new Error(`Invalid Initial Plan: incomplete instructions in week ${weekNumber}`);
@@ -364,9 +383,10 @@ function cleanInitialPlan(value, submission) {
 function cleanPersonalGrowthPlan(value, submission) {
   if (!value || typeof value !== 'object') throw new Error('Invalid personal growth plan response');
   const cycleWeeks = Number(submission.cycleWeeks);
-  const available = new Set(Array.isArray(submission.availableDays) ? submission.availableDays : []);
+  const availableDays = Array.isArray(submission.availableDays) ? submission.availableDays : [];
+  const available = new Set(availableDays);
   const weeklyMinutes = Number(submission.weeklyMinutes);
-  if (![4, 8, 12].includes(cycleWeeks) || !available.size || !Number.isFinite(weeklyMinutes)) throw new Error('Invalid personal growth availability');
+  if (!Number.isInteger(cycleWeeks) || cycleWeeks <= 0 || !available.size || !Number.isFinite(weeklyMinutes)) throw new Error('Invalid personal growth availability');
   if (!Array.isArray(value.weeks) || value.weeks.length !== cycleWeeks) throw new Error('Invalid personal growth plan: week count');
   if (!Array.isArray(value.milestones) || !value.milestones.length) throw new Error('Invalid personal growth plan: milestones');
 
@@ -378,16 +398,17 @@ function cleanPersonalGrowthPlan(value, submission) {
     successSignal: requiredText(milestone.successSignal, 'milestone success signal', 300),
   }));
   const weeks = value.weeks.map((week, weekIndex) => {
-    const weekNumber = Number(week.weekNumber);
-    if (weekNumber !== weekIndex + 1) throw new Error('Invalid personal growth plan: week numbering');
+    const weekNumber = weekIndex + 1;
     if (!Array.isArray(week.tasks) || !week.tasks.length) throw new Error(`Invalid personal growth plan: week ${weekNumber} tasks`);
     const tasks = week.tasks.map((task, taskIndex) => {
-      const weekday = Number(task.weekday);
-      const totalMinutes = Number(task.totalMinutes);
-      if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6 || !available.has(weekday)) throw new Error(`Invalid personal growth plan: unavailable day in week ${weekNumber}`);
-      if (!Number.isInteger(totalMinutes) || totalMinutes < 10 || totalMinutes > 120) throw new Error(`Invalid personal growth plan: invalid task time in week ${weekNumber}`);
-      const limit = dailyTimeLimit[submission.timeByDay?.[weekday] ?? 'unknown'] ?? 30;
-      if (totalMinutes > limit) throw new Error(`Invalid personal growth plan: task exceeds daily limit in week ${weekNumber}`);
+      const requestedWeekday = Number(task.weekday);
+      const weekday = Number.isInteger(requestedWeekday) && available.has(requestedWeekday)
+        ? requestedWeekday
+        : availableDays[taskIndex % availableDays.length];
+      const requestedMinutes = Number(task.totalMinutes);
+      if (!Number.isFinite(requestedMinutes)) throw new Error(`Invalid personal growth plan: invalid task time in week ${weekNumber}`);
+      const limit = dailyMinutes(submission, weekday);
+      const totalMinutes = Math.min(limit, Math.max(1, Math.round(requestedMinutes)));
       return {
         id: `week-${weekNumber}-task-${taskIndex + 1}`,
         weekNumber,
@@ -402,14 +423,17 @@ function cleanPersonalGrowthPlan(value, submission) {
         coachingReason: requiredText(task.coachingReason, 'coaching reason', 300),
       };
     });
-    if (tasks.reduce((total, task) => total + task.totalMinutes, 0) > weeklyMinutes) throw new Error(`Invalid personal growth plan: weekly limit in week ${weekNumber}`);
+    const requestedWeeklyMinutes = tasks.reduce((total, task) => total + task.totalMinutes, 0);
+    const scheduledTasks = requestedWeeklyMinutes > weeklyMinutes
+      ? tasks.map((task) => ({ ...task, totalMinutes: Math.max(1, Math.floor(task.totalMinutes * weeklyMinutes / requestedWeeklyMinutes)) }))
+      : tasks;
     return {
       id: `week-${weekNumber}`,
       weekNumber,
       status: 'DRAFT',
       focus: requiredText(week.focus, 'week focus', 300),
-      estimatedTotalMinutes: tasks.reduce((total, task) => total + task.totalMinutes, 0),
-      tasks,
+      estimatedTotalMinutes: scheduledTasks.reduce((total, task) => total + task.totalMinutes, 0),
+      tasks: scheduledTasks,
     };
   });
   return {
@@ -433,10 +457,10 @@ export function buildGeminiRequest(input) {
     const reason = String(input.reason ?? '').trim().slice(0, 500);
     return {
       system_instruction: {
-        parts: [{ text: 'You revise a complete personal growth plan in Traditional Chinese. Make the smallest useful change that answers the requested feedback. Preserve the user-provided goal, available days, weekly time limit, preferences and constraints. Do not invent courses, credentials, personal facts or professional advice. Return the entire plan using the same schema, with concrete small tasks and easier fallbacks.' }],
+        parts: [{ text: 'You revise a complete personal growth plan in Traditional Chinese. Make the smallest useful change that answers the requested feedback. Preserve the user-provided goal, available days, weekly time limit, preferences and constraints. Do not invent courses, credentials, personal facts or professional advice. Keep every string concise: normally one short sentence per text field, and exactly three short instruction steps per task. Return the entire plan using the same schema, with concrete small tasks and easier fallbacks.' }],
       },
       contents: [{ role: 'user', parts: [{ text: `Revise this personal growth draft only.\nFeedback: ${input.feedback}\nOptional reason: ${reason || '(none)'}\nSubmission:\n${JSON.stringify(submission)}\nCurrent plan:\n${JSON.stringify(currentPlan)}` }] }],
-      generationConfig: jsonGenerationConfig(personalGrowthPlanSchema, 8192),
+      generationConfig: jsonGenerationConfig(personalGrowthPlanSchema, 32768),
     };
   }
 
@@ -444,10 +468,10 @@ export function buildGeminiRequest(input) {
     const submission = sanitizePersonalGrowthSubmission(input.submission);
     return {
       system_instruction: {
-        parts: [{ text: 'You are a warm but practical personal growth coach. Generate a complete structured plan in Traditional Chinese from the supplied personal growth submission only. The direction-template answers are the user’s authoritative context; make the title, milestones and tasks specifically reflect them. Keep the plan small, concrete and sustainable. Respect the weekly minutes, available days, daily time windows, current level, preferred formats and constraints. Do not diagnose, prescribe treatment, invent user facts, promise outcomes, or require paid resources. If the requested outcome is too large for the cycle, mark feasibility ADJUSTED and explain the smallest useful first milestone. Every task needs at least three beginner-friendly instructions, a completion criterion, an easier fallback and a coaching reason. HARD OUTPUT RULE: read cycleWeeks from the submission and return exactly that many week objects, numbered consecutively from 1 through cycleWeeks. Never return a shorter preview or a partial plan.' }],
+        parts: [{ text: 'You are a warm but practical personal growth coach. Generate a complete structured plan in Traditional Chinese from the supplied personal growth submission only. The direction-template answers are the user’s authoritative context; make the title, milestones and tasks specifically reflect them. Keep the plan small, concrete and sustainable. Respect the weekly minutes, available days, daily time windows, current level, preferred formats and constraints. Do not diagnose, prescribe treatment, invent user facts, promise outcomes, or require paid resources. If the requested outcome is too large for the cycle, mark feasibility ADJUSTED and explain the smallest useful first milestone. Every task needs exactly three beginner-friendly, concise instructions, a concise completion criterion, a concise easier fallback and a concise coaching reason. Keep every text field to one short sentence where possible; do not add explanations beyond the schema. HARD OUTPUT RULE: read cycleWeeks from the submission and return exactly that many week objects, numbered consecutively from 1 through cycleWeeks. Never return a shorter preview or a partial plan.' }],
       },
       contents: [{ role: 'user', parts: [{ text: `Create the complete personal growth plan from this submission only:\n${JSON.stringify(submission)}` }] }],
-      generationConfig: jsonGenerationConfig(personalGrowthPlanSchema, 8192),
+      generationConfig: jsonGenerationConfig(personalGrowthPlanSchema, 32768),
     };
   }
 
@@ -537,6 +561,66 @@ export function parseGeminiJson(response) {
   return JSON.parse(text);
 }
 
+/** Maps the existing validated prompt and schema to the Vertex AI SDK shape. */
+export function buildVertexRequest(input) {
+  const request = buildGeminiRequest(input);
+  const systemText = request.system_instruction?.parts?.map((part) => part.text ?? '').join('\n').trim();
+  return {
+    contents: request.contents.map((content) => ({
+      role: content.role,
+      parts: content.parts.map((part) => part.inline_data
+        ? { inlineData: { mimeType: part.inline_data.mime_type, data: part.inline_data.data } }
+        : { text: part.text ?? '' }),
+    })),
+    config: {
+      ...request.generationConfig,
+      responseJsonSchema: request.generationConfig.responseSchema,
+      responseSchema: undefined,
+      ...(systemText ? { systemInstruction: systemText } : {}),
+    },
+  };
+}
+
+function parseVertexJson(response) {
+  const text = typeof response?.text === 'string'
+    ? response.text.trim()
+    : response?.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('').trim();
+  if (!text) throw new Error('Vertex AI returned no text');
+  return JSON.parse(text);
+}
+
+function cleanGeneratedValue(input, value) {
+  if (input.kind === 'initial-coaching-plan' || input.kind === 'initial-coaching-revision') return cleanInitialPlan(value, sanitizeSubmission(input.submission));
+  if (input.kind === 'personal-growth-plan' || input.kind === 'personal-growth-revision') return cleanPersonalGrowthPlan(value, sanitizePersonalGrowthSubmission(input.submission));
+  if (input.kind === 'running-plan') return cleanPlan(value, input.assessment);
+  const text = String(value.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  if (!text) throw new Error('Gemini returned an empty encouragement');
+  return { text };
+}
+
+async function generateWithVertex(input, options) {
+  const project = options.project?.trim() || process.env.GOOGLE_CLOUD_PROJECT?.trim();
+  if (!project) throw new Error('GOOGLE_CLOUD_PROJECT is required for Vertex AI');
+  const location = options.location?.trim() || process.env.GOOGLE_CLOUD_LOCATION?.trim() || 'global';
+  const model = options.model || process.env.VERTEX_AI_MODEL?.trim() || 'gemini-2.5-flash';
+  const client = options.vertexClient ?? new GoogleGenAI({ vertexai: true, project, location, apiVersion: 'v1' });
+  const request = { model, ...buildVertexRequest(input) };
+  const canRetry = input.kind === 'personal-growth-plan' || input.kind === 'personal-growth-revision';
+  let lastError;
+  for (let attempt = 0; attempt < (canRetry ? 2 : 1); attempt += 1) {
+    try {
+      const response = await client.models.generateContent(request);
+      return cleanGeneratedValue(input, parseVertexJson(response));
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : '';
+      const permanent = /permission|credential|unauthenticated|forbidden|quota|resource exhausted|invalid argument|not found/i.test(message);
+      if (attempt === 1 || permanent) throw error;
+    }
+  }
+  throw lastError ?? new Error('Vertex AI request failed');
+}
+
 function cleanPlan(value, assessment) {
   const available = new Set(Array.isArray(assessment.availableDays) ? assessment.availableDays : []);
   const weekdays = Array.isArray(value.weekdays)
@@ -553,6 +637,7 @@ function cleanPlan(value, assessment) {
 }
 
 export async function generateWithGemini(input, options) {
+  if (options.provider === 'vertex') return generateWithVertex(input, options);
   const { apiKey, model = 'gemini-3.1-flash-lite', fetchImpl = fetch } = options;
   if (!apiKey) throw new Error('GEMINI_API_KEY is not configured');
   const request = buildGeminiRequest(input);
@@ -569,15 +654,5 @@ export async function generateWithGemini(input, options) {
     const details = await response.text();
     throw new Error(`Gemini API ${response.status}: ${details.slice(0, 300)}`);
   }
-  const value = parseGeminiJson(await response.json());
-  if (input.kind === 'initial-coaching-plan' || input.kind === 'initial-coaching-revision') {
-    return cleanInitialPlan(value, sanitizeSubmission(input.submission));
-  }
-  if (input.kind === 'personal-growth-plan' || input.kind === 'personal-growth-revision') {
-    return cleanPersonalGrowthPlan(value, sanitizePersonalGrowthSubmission(input.submission));
-  }
-  if (input.kind === 'running-plan') return cleanPlan(value, input.assessment);
-  const text = String(value.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
-  if (!text) throw new Error('Gemini returned an empty encouragement');
-  return { text };
+  return cleanGeneratedValue(input, parseGeminiJson(await response.json()));
 }

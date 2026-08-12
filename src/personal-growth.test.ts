@@ -69,6 +69,19 @@ test('舊帳戶沒有個人成長資料時會安全補上空陣列', () => {
   assert.deepEqual(migrated.personalGrowthGoals, []);
 });
 
+test('舊五步個人成長草稿會遷移到移除方向步驟後的四步流程', () => {
+  const migrated = normaliseAccount({
+    id: 'legacy-growth-step', email: 'legacy-step@example.com', timezone: 'Asia/Hong_Kong', photoAnalysisConsent: false,
+    notificationPermission: 'denied', drafts: [], goals: [],
+    personalGrowthOnboardingDraft: {
+      currentStep: 4 as never,
+      submission: defaultPersonalGrowthSubmission,
+      updatedAt: '2026-08-11T00:00:00.000Z',
+    },
+  });
+  assert.equal(migrated.personalGrowthOnboardingDraft?.currentStep, 3);
+});
+
 test('八個成長方向都有三至五條選擇式模板題目，並可用其他補充答案', () => {
   assert.equal(Object.keys(personalGrowthTemplates).length, 8);
   Object.values(personalGrowthTemplates).forEach((questions) => {
@@ -86,6 +99,54 @@ test('八個成長方向都有三至五條選擇式模板題目，並可用其�
   const prepared = preparePersonalGrowthSubmission(submission);
   assert.match(prepared.outcome, /語言學習/);
   assert.match(prepared.currentSituation ?? '', /海外同事/);
+});
+
+test('模板第二部分支援多選答案，並會保留在生成摘要', () => {
+  const submission = {
+    ...validSubmission,
+    focus: { primary: 'focus_time' as const, secondary: [] },
+    templateAnswers: {
+      focus_problem: ['phone', 'interruptions'],
+      focus_context: ['work', 'project'],
+      focus_time: ['evening'],
+      focus_habit: ['list', 'other'],
+    },
+    templateOtherAnswers: { focus_habit: '用紙筆記錄' },
+  };
+  assert.equal(hasCompleteTemplateAnswers(submission), true);
+  const prepared = preparePersonalGrowthSubmission(submission);
+  assert.match(prepared.currentSituation ?? '', /手機分心、經常被打斷/);
+  assert.match(prepared.currentSituation ?? '', /用紙筆記錄/);
+});
+
+test('個人成長排程支援其他週期、開始日及開始時間', () => {
+  const workflow = new PersonalGrowthWorkflow();
+  const submission = normalisePersonalGrowthSubmission({
+    ...validSubmission,
+    cycleWeeks: 16,
+    startDate: '2026-09-01',
+    preferredTimeSlot: 'other',
+    preferredStartTime: '10:30',
+  });
+  const draft = workflow.createFallbackPlan(submission, new Date('2026-08-12T00:00:00.000Z'));
+  assert.equal(draft.cycleWeeks, 16);
+  assert.equal(draft.weeks.length, 16);
+  assert.equal(draft.weeks[0].tasks[0].startTime, '10:30');
+  assert.equal(draft.submission.startDate, '2026-09-01');
+});
+
+test('個人成長排程支援其他每週及每日投入時間', () => {
+  const workflow = new PersonalGrowthWorkflow();
+  const submission = normalisePersonalGrowthSubmission({
+    ...validSubmission,
+    weeklyMinutes: 600,
+    timeByDay: { 2: 'other', 4: '30_45', 6: '45_60' },
+    timeByDayCustom: { 2: 500 },
+  });
+  const draft = workflow.createFallbackPlan(submission, new Date('2026-08-12T00:00:00.000Z'));
+  assert.equal(draft.submission.timeByDay[2], 'other');
+  assert.equal(draft.submission.timeByDayCustom?.[2], 500);
+  assert.equal(draft.weeks[0].tasks.find((task) => task.weekday === 2)?.totalMinutes, 200);
 });
 
 test('選擇開始日會為草稿安排可編輯日期，且多個個人成長計畫可同時確認', () => {

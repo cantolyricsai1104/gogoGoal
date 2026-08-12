@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildGeminiRequest, generateWithGemini, parseGeminiJson } from './gemini.mjs';
+import { buildGeminiRequest, buildVertexRequest, generateWithGemini, parseGeminiJson } from './gemini.mjs';
 
 const assessment = {
   ageRange: '25–34',
@@ -80,6 +80,20 @@ test('Gemini generation config uses the REST structured-output fields', () => {
   assert.equal('responseFormat' in request.generationConfig, false);
 });
 
+test('完整個人成長計畫保留足夠輸出預算，避免十二週 JSON 被截斷', () => {
+  const request = buildGeminiRequest({ kind: 'personal-growth-plan', submission: { ...growthSubmission, cycleWeeks: 8 } });
+  assert.equal(request.generationConfig.maxOutputTokens, 32768);
+});
+
+test('Vertex request preserves the structured-output contract without an API key', () => {
+  const request = buildVertexRequest({ kind: 'personal-growth-plan', submission: growthSubmission });
+  const developerRequest = buildGeminiRequest({ kind: 'personal-growth-plan', submission: growthSubmission });
+  assert.equal(request.config.responseMimeType, 'application/json');
+  assert.deepEqual(request.config.responseJsonSchema, developerRequest.generationConfig.responseSchema);
+  assert.equal(request.config.responseSchema, undefined);
+  assert.match(request.config.systemInstruction, /Traditional Chinese/);
+});
+
 function completeGrowthPlan() {
   return {
     title: '四週小工具起步',
@@ -112,6 +126,21 @@ test('Personal Growth response 會由 server 固定為 Draft 並保留週任務'
   assert.equal(result.weeks.length, 4);
   assert.deepEqual(result.weeks.map((week) => week.status), Array(4).fill('DRAFT'));
   assert.equal(result.weeks[0].tasks[0].status, 'DRAFT');
+});
+
+test('Personal Growth keeps AI content while normalising an invalid AI schedule', async () => {
+  const generated = completeGrowthPlan();
+  generated.title = 'AI-specific interpersonal communication plan';
+  generated.weeks[0].tasks[0].weekday = 1;
+  generated.weeks[0].tasks[0].totalMinutes = 120;
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(generated) }] } }] }) });
+
+  const result = await generateWithGemini({ kind: 'personal-growth-plan', submission: growthSubmission }, { apiKey: 'test-key', fetchImpl });
+
+  assert.equal(result.title, 'AI-specific interpersonal communication plan');
+  assert.ok(growthSubmission.availableDays.includes(result.weeks[0].tasks[0].weekday));
+  assert.ok(result.weeks[0].tasks[0].totalMinutes <= 45);
+  assert.ok(result.weeks[0].estimatedTotalMinutes <= growthSubmission.weeklyMinutes);
 });
 
 function completeInitialPlan(weekday = 1) {

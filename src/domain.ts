@@ -16,11 +16,13 @@ export type GoalClassification = {
 export type PersonalGrowthFocus = 'new_skill' | 'language_learning' | 'reading_knowledge' | 'mindset' | 'focus_time' | 'creative_expression' | 'self_reflection' | 'discipline_habits' | 'other';
 export type PersonalGrowthLevel = 'starting' | 'some_experience' | 'intermediate' | 'advanced' | 'unknown';
 export type PersonalGrowthFormat = 'reading' | 'video' | 'practice' | 'project' | 'mixed';
-export type PersonalGrowthCycleWeeks = 4 | 8 | 12;
+export type PersonalGrowthCycleWeeks = number;
 export type PersonalGrowthTaskStatus = 'DRAFT' | 'PLANNED' | 'COMPLETED' | 'SKIPPED';
 export type PersonalGrowthClassification = { category: 'personal_growth'; subcategory: 'growth' };
-export type PersonalGrowthTemplateAnswers = Record<string, string>;
-export type PersonalGrowthTimeSlot = 'morning' | 'afternoon' | 'evening';
+export type PersonalGrowthTemplateAnswer = string | string[];
+export type PersonalGrowthTemplateAnswers = Record<string, PersonalGrowthTemplateAnswer>;
+export type PersonalGrowthTemplateOtherAnswers = Record<string, string>;
+export type PersonalGrowthTimeSlot = 'morning' | 'afternoon' | 'evening' | 'other';
 
 export type PersonalGrowthSubmission = {
   schemaVersion: 'personal-growth-onboarding/v1';
@@ -36,6 +38,8 @@ export type PersonalGrowthSubmission = {
   weeklyMinutes: number;
   availableDays: Weekday[];
   timeByDay: Partial<Record<Weekday, DailyTimeRange>>;
+  /** Custom daily minutes when a day uses the 「其他」 range. */
+  timeByDayCustom?: Partial<Record<Weekday, number>>;
   preferredFormats: PersonalGrowthFormat[];
   preferredLanguage?: string;
   constraints?: string;
@@ -44,10 +48,11 @@ export type PersonalGrowthSubmission = {
   /** Structured answers from the selected direction template. */
   templateAnswers: PersonalGrowthTemplateAnswers;
   /** Free text is only kept when a template answer is 「其他」. */
-  templateOtherAnswers: PersonalGrowthTemplateAnswers;
+  templateOtherAnswers: PersonalGrowthTemplateOtherAnswers;
   /** Local plan start date, selected before generation (YYYY-MM-DD). */
   startDate?: string;
   preferredTimeSlot?: PersonalGrowthTimeSlot;
+  preferredStartTime?: string;
 };
 
 export type PersonalGrowthTask = {
@@ -131,7 +136,7 @@ export type JogAbility = 'walk_30' | 'under_5' | '5_10' | '10_20' | '20_30' | '3
 export type ActivityDays = 0 | 1 | 2 | 3 | 4 | '5_plus' | 'unknown';
 export type WeeklyActivityTime = 'under_30' | '30_60' | '1_2_hours' | '2_3_hours' | '3_plus_hours' | 'unknown';
 export type ActivityType = 'running' | 'walking' | 'strength' | 'ball_sports' | 'swimming' | 'cycling' | 'other';
-export type DailyTimeRange = '20_30' | '30_45' | '45_60' | '60_90' | '90_plus' | 'unknown';
+export type DailyTimeRange = '20_30' | '30_45' | '45_60' | '60_90' | '90_plus' | 'other' | 'unknown';
 export type RealisticFrequency = 2 | 3 | 4 | 5 | 'coach';
 
 export type RecentRun =
@@ -352,7 +357,8 @@ export type Account = {
 };
 
 export type PersonalGrowthOnboardingDraft = {
-  currentStep: 0 | 1 | 2 | 3 | 4;
+  /** Four-question flow; direction is selected on the preceding category screen. */
+  currentStep: 0 | 1 | 2 | 3;
   submission: PersonalGrowthSubmission;
   updatedAt: string;
 };
