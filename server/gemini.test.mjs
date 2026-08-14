@@ -179,7 +179,7 @@ test('Vertex 遇到暫時性的 Resource exhausted 會退避後重試個人成�
   assert.equal(result.week.weekNumber, 1);
 });
 
-test('Vertex 會要求模型修正少於三個任務的個人成長週計畫', async () => {
+test('Vertex 會要求模型修正少於選定日數的個人成長週計畫', async () => {
   let calls = 0;
   const incomplete = completeGrowthWeek();
   incomplete.week.tasks.pop();
@@ -196,7 +196,7 @@ test('Vertex 會要求模型修正少於三個任務的個人成長週計畫', a
     { provider: 'vertex', project: 'test-project', vertexClient, retryDelayMs: 0 },
   );
   assert.equal(calls, 2);
-  assert.equal(result.week.tasks.length, 3);
+  assert.equal(result.week.tasks.length, growthSubmission.availableDays.length);
 });
 
 test('Personal Growth keeps AI content while normalising an invalid AI schedule', async () => {
@@ -214,14 +214,33 @@ test('Personal Growth keeps AI content while normalising an invalid AI schedule'
   assert.ok(result.week.estimatedTotalMinutes <= growthSubmission.weeklyMinutes);
 });
 
-test('Personal Growth 拒絕少於三個任務的週計畫，避免泛用的未完成草案', async () => {
+test('Personal Growth 拒絕少於選定日數的週計畫，避免泛用的未完成草案', async () => {
   const generated = completeGrowthWeek();
   generated.week.tasks.pop();
   const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(generated) }] } }] }) });
   await assert.rejects(
     generateWithGemini({ kind: 'personal-growth-plan', submission: { ...growthSubmission, outcome: 'expense tracker', successDefinition: 'record three expenses and show their total' } }, { apiKey: 'test-key', fetchImpl }),
-    /exactly three tasks/,
+    /exactly 3 tasks/,
   );
+});
+
+test('Personal Growth 會為每個選定日安排一個任務', async () => {
+  const allDays = [0, 1, 2, 3, 4, 5, 6];
+  const generated = completeGrowthWeek();
+  generated.week.tasks = allDays.map((_, index) => ({
+    ...generated.week.tasks[index % generated.week.tasks.length],
+    title: `小工具練習 ${index + 1}`,
+  }));
+  const submission = {
+    ...growthSubmission,
+    availableDays: allDays,
+    weeklyMinutes: 210,
+    timeByDay: Object.fromEntries(allDays.map((day) => [day, '30_45'])),
+  };
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(generated) }] } }] }) });
+  const result = await generateWithGemini({ kind: 'personal-growth-plan', submission }, { apiKey: 'test-key', fetchImpl });
+  assert.equal(result.week.tasks.length, allDays.length);
+  assert.deepEqual(result.week.tasks.map((task) => task.weekday), allDays);
 });
 
 test('專案型個人成長拒絕沒有連結使用者成果的最終任務', async () => {

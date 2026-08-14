@@ -141,7 +141,7 @@ const personalGrowthPlanSchema = {
         properties: {
           weekNumber: { type: 'integer', minimum: 1 },
           focus: { type: 'string' },
-          tasks: { type: 'array', minItems: 1, maxItems: 5, items: personalGrowthTaskSchema },
+          tasks: { type: 'array', minItems: 1, maxItems: 7, items: personalGrowthTaskSchema },
         },
         required: ['weekNumber', 'focus', 'tasks'],
       },
@@ -171,7 +171,7 @@ const personalGrowthWeeklyPlanSchema = {
       properties: {
         weekNumber: { type: 'integer', minimum: 1 },
         focus: { type: 'string' },
-        tasks: { type: 'array', minItems: 1, maxItems: 5, items: personalGrowthTaskSchema },
+        tasks: { type: 'array', minItems: 1, maxItems: 7, items: personalGrowthTaskSchema },
       },
       required: ['weekNumber', 'focus', 'tasks'],
     },
@@ -464,12 +464,9 @@ function cleanPersonalGrowthPlan(value, submission) {
   }));
   const weeks = value.weeks.map((week, weekIndex) => {
     const weekNumber = weekIndex + 1;
-    if (!Array.isArray(week.tasks) || !week.tasks.length) throw new Error(`Invalid personal growth plan: week ${weekNumber} tasks`);
+    if (!Array.isArray(week.tasks) || week.tasks.length !== availableDays.length) throw new Error(`Invalid personal growth plan: week ${weekNumber} needs exactly ${availableDays.length} tasks`);
     const tasks = week.tasks.map((task, taskIndex) => {
-      const requestedWeekday = Number(task.weekday);
-      const weekday = Number.isInteger(requestedWeekday) && available.has(requestedWeekday)
-        ? requestedWeekday
-        : availableDays[taskIndex % availableDays.length];
+      const weekday = availableDays[taskIndex];
       const requestedMinutes = Number(task.totalMinutes);
       if (!Number.isFinite(requestedMinutes)) throw new Error(`Invalid personal growth plan: invalid task time in week ${weekNumber}`);
       const limit = dailyMinutes(submission, weekday);
@@ -533,12 +530,11 @@ function cleanPersonalGrowthWeek(value, submission, expectedWeekNumber) {
   const weeklyMinutes = Number(submission.weeklyMinutes);
   if (!available.size || !Number.isFinite(weeklyMinutes)) throw new Error('Invalid personal growth availability');
   if (Number(value?.weekNumber) !== expectedWeekNumber) throw new Error('Invalid personal growth plan: unexpected week number');
-  if (!Array.isArray(value.tasks) || value.tasks.length !== 3) throw new Error(`Invalid personal growth plan: week ${expectedWeekNumber} needs exactly three tasks`);
+  if (!Array.isArray(value.tasks) || value.tasks.length !== availableDays.length) throw new Error(`Invalid personal growth plan: week ${expectedWeekNumber} needs exactly ${availableDays.length} tasks`);
   const tasks = value.tasks.map((task, taskIndex) => {
-    const requestedWeekday = Number(task.weekday);
-    const weekday = Number.isInteger(requestedWeekday) && available.has(requestedWeekday)
-      ? requestedWeekday
-      : availableDays[taskIndex % availableDays.length];
+    // The task order is the canonical schedule: one task for each selected day.
+    // This prevents the model from duplicating a day or silently omitting one.
+    const weekday = availableDays[taskIndex];
     const requestedMinutes = Number(task.totalMinutes);
     if (!Number.isFinite(requestedMinutes)) throw new Error(`Invalid personal growth plan: invalid task time in week ${expectedWeekNumber}`);
     const totalMinutes = Math.min(dailyMinutes(submission, weekday), Math.max(1, Math.round(requestedMinutes)));
@@ -606,7 +602,7 @@ WEEKLY PLANNING STANDARD
 - Generate only the requested week. Do not create a roadmap, milestones, placeholder tasks, advice, or schedule for later weeks; later weeks will be planned after the user reports real progress.
 - The week must build toward a visible success signal. Every task title must name an action plus a concrete decision, artifact, test, or deliverable—not merely a topic. Never use vague standalone tasks such as "learn", "practice", "research" or "stay motivated". For example, do not make "research programming languages" a task; make a bounded comparison with recorded decision criteria, then a small working or visible artifact.
 - Week 1 must end with at least one visible artifact, demonstrated action, or recorded decision in the chosen goal. Setup, account creation, resource browsing, or environment installation may support an action but cannot be the only outcome of a task or the week's success signal.
-- When the outcome is a project, use the outcome and successDefinition to make a minimum vertical slice during week 1. The three tasks should normally produce: (1) a small input/output or scope decision artifact, (2) the first concrete behaviour or content, and (3) an end-to-end check against one part of the success definition. Tool choice and setup may appear only as a short instruction inside a task; they must never be a task title or its primary completion criterion. A "Hello World" result alone is not a project slice.
+- When the outcome is a project, use the outcome and successDefinition to make a minimum vertical slice during week 1. The tasks should progress from a small input/output or scope decision artifact, through the first concrete behaviour or content, to an end-to-end check against one part of the success definition. With more available days, extend that sequence with small, distinct steps rather than duplicating work. Tool choice and setup may appear only as a short instruction inside a task; they must never be a task title or its primary completion criterion. A "Hello World" result alone is not a project slice.
 - At least two task titles and every completionCriteria must name a noun or behaviour from the user's outcome or successDefinition. State any default tool choice as an editable recommendation, not as a fact about the user.
 - Each task needs exactly three observable instructions: prepare, do focused work, then preserve a short record or review. completionCriteria must name visible evidence. easierFallback must be a real 10 to 15 minute version that preserves the next step. coachingReason explains why the task belongs in this particular week.
 - When a resource helps, include it naturally in an instruction as an exploration suggestion: platform or resource type only when confident, a precise search phrase, why it fits the level, and likely free or paid status. Never write any URL, domain, hyperlink, course title, current availability or a YouTube channel. Do not output text such as ".com", "www", "http" or a Markdown link.
@@ -616,27 +612,27 @@ INTERNAL QUALITY GATE
 Before returning JSON, silently repair generic, duplicate, unsupported, over-budget, evidence-free, fallback-free, or abruptly difficult tasks. Do not reveal hidden reasoning.
 
 OUTPUT CONTRACT
-- Return only the supplied JSON schema and exactly one week object with the requested weekNumber. Do not add Markdown, citations, new fields, milestones, or future weeks.
+- Return only the supplied JSON schema and exactly one week object with the requested weekNumber. Return exactly one task for every day in submission.availableDays, in the same order; do not omit or duplicate selected days. Do not add Markdown, citations, new fields, milestones, or future weeks.
 - Keep summaries concise but make task instructions, completion criteria, fallback and coaching reason detailed enough to follow.`;
 
 const personalGrowthNextWeekInstruction = `You are Go Go Goal's senior personal-growth learning designer. Generate exactly one next Personal Growth week in Traditional Chinese from the original submission, completed week history, and the latest weekly review.
 
 Preserve the original goal and success definition. Use the review as evidence: adjust task amount, order, difficulty, and resource direction to respond to actual minutes, difficulty, obstacle, evidence, and confidence. Never silently change the target date or cycle length. Explain user-facing changes and the reason in reasoningSummary.
 
-Use only availableDays, daily time windows, and at most weeklyMinutes; normally keep a 20 to 30% buffer. Produce exactly three observable instructions per task, visible completion evidence, a genuine 10 to 15 minute fallback, and a goal-specific coaching reason. Generate only the requested next week—never regenerate prior weeks, make a future roadmap, or invent facts, links, courses, channels, credentials, or personal history. Return only the supplied JSON schema.`;
+Use only availableDays, daily time windows, and at most weeklyMinutes; normally keep a 20 to 30% buffer. Produce exactly one task for every day in availableDays, in the same order, with no omitted or duplicated days. Each task needs exactly three observable instructions, visible completion evidence, a genuine 10 to 15 minute fallback, and a goal-specific coaching reason. Generate only the requested next week—never regenerate prior weeks, make a future roadmap, or invent facts, links, courses, channels, credentials, or personal history. Return only the supplied JSON schema.`;
 
 function personalGrowthOutcomeAnchor(submission) {
   const projectBased = isProjectBasedPersonalGrowthSubmission(submission);
   const target = JSON.stringify({ outcome: submission.outcome, successDefinition: submission.successDefinition });
   if (!projectBased) return `OUTCOME ANCHOR: Keep every task directly tied to this user-defined outcome and success definition: ${target}`;
-  return `NON-NEGOTIABLE PROJECT OUTCOME ANCHOR: ${target}\nThe user has already chosen this exact project in outcome. Never ask them to list project ideas, choose another project, or write a generic project definition. Do not substitute generic skill learning, language comparison, environment setup, tutorials, or Hello World for the user's project. If the tool is unspecified, choose one simple editable default inside the first task and use it immediately. Return exactly three sequential tasks. The final task must implement and test one working vertical slice of the stated success definition. Its completionCriteria must include this exact success definition verbatim: "${submission.successDefinition}". Every task title and completion criterion must name a decision, input, behaviour, or output from this specific project.`;
+  return `NON-NEGOTIABLE PROJECT OUTCOME ANCHOR: ${target}\nThe user has already chosen this exact project in outcome. Never ask them to list project ideas, choose another project, or write a generic project definition. Do not substitute generic skill learning, language comparison, environment setup, tutorials, or Hello World for the user's project. If the tool is unspecified, choose one simple editable default inside the first task and use it immediately. Return exactly one sequential task for every selected available day, with the final task implementing and testing one working vertical slice of the stated success definition. Its completionCriteria must include this exact success definition verbatim: "${submission.successDefinition}". Every task title and completion criterion must name a decision, input, behaviour, or output from this specific project.`;
 }
 
 const personalGrowthRevisionInstruction = `You are Go Go Goal's senior personal-growth learning designer. Revise the supplied personal-growth plan in Traditional Chinese using only the submission, the current plan and the user's requested feedback.
 
 Keep the user's goal, success definition, available days, time limits, preferences and constraints intact. Make the smallest useful change: preserve working progress, reduce or split work when the user needs an easier start, and never increase difficulty merely because the user asks for more challenge without clear evidence. If a date or capacity conflict would require changing the overall target, explain the trade-off in reasoningSummary instead of silently changing the goal.
 
-Return the complete plan in the same schema. Keep week 1 or the next actionable work concrete: each task needs exactly three observable instructions, a visible completion criterion, a real 10 to 15 minute fallback and a goal-specific coaching reason. Keep later weeks as adaptable milestone checkpoints. Respect weeklyMinutes, daily time windows and availableDays; normally leave a 20 to 30% weekly buffer. Resource suggestions may appear only as careful exploration instructions with a search phrase and no invented links, courses or channels.
+Return the complete plan in the same schema. Every week must contain exactly one task for every day in availableDays, in the same order, with no omitted or duplicated days. Keep week 1 or the next actionable work concrete: each task needs exactly three observable instructions, a visible completion criterion, a real 10 to 15 minute fallback and a goal-specific coaching reason. Keep later weeks as adaptable milestone checkpoints. Respect weeklyMinutes, daily time windows and availableDays; normally leave a 20 to 30% weekly buffer. Resource suggestions may appear only as careful exploration instructions with a search phrase and no invented links, courses or channels.
 
 Before returning JSON, silently repair vague, duplicated, over-budget or unsupported tasks. Use reasoningSummary to state what changed and why in user-facing language; do not expose hidden reasoning. Return only valid JSON using the supplied schema and exactly cycleWeeks consecutive weeks.`;
 
@@ -830,7 +826,7 @@ async function generateWithVertex(input, options) {
       const message = error instanceof Error ? error.message : '';
       const qualityRepairable = canRetry && /Invalid personal growth plan/i.test(message);
       if (qualityRepairable && attempt < maxAttempts - 1) {
-        const repair = 'QUALITY REPAIR: The previous candidate was invalid. Return exactly three detailed sequential tasks. For a project outcome, use the exact user-selected project and success definition; do not output generic project ideas, tool comparison, setup-only work, tutorials, or Hello World.';
+        const repair = 'QUALITY REPAIR: The previous candidate was invalid. Return exactly one detailed sequential task for every day in submission.availableDays, in the same order, with no omitted or duplicated days. For a project outcome, use the exact user-selected project and success definition; do not output generic project ideas, tool comparison, setup-only work, tutorials, or Hello World.';
         request.contents = request.contents.map((content) => ({
           ...content,
           parts: content.parts.map((part) => part.text ? { ...part, text: `${part.text}\n${repair}` } : part),
